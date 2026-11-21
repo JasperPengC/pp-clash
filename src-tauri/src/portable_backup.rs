@@ -30,6 +30,7 @@ struct Document {
 pub struct Preview {
     device: String,
     profiles: usize,
+    collections: usize,
 }
 
 fn project(source: &Value, fields: &[&str]) -> Map<String, Value> {
@@ -90,9 +91,11 @@ fn read(bytes: &[u8]) -> Result<Document, String> {
 
 pub fn preview(bytes: &[u8]) -> Result<Preview, String> {
     let doc = read(bytes)?;
+    let profiles = doc.state["profiles"].as_array().unwrap();
     Ok(Preview {
         device: doc.device,
-        profiles: doc.state["profiles"].as_array().unwrap().len(),
+        profiles: profiles.len(),
+        collections: profiles.iter().filter(|p| p["sourceType"] == "collection").count(),
     })
 }
 
@@ -146,6 +149,22 @@ pub fn merge(current: &[u8], incoming: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn collection_recipe_survives_portable_restore() {
+        let source = serde_json::json!({"profiles":[
+            {"id":"a","name":"A","url":"","raw":"a","sourceType":"file"},
+            {"id":"b","name":"B","url":"","raw":"b","sourceType":"file"},
+            {"id":"c","name":"C","url":"","raw":"combined","sourceType":"collection",
+             "collection":{"sources":["b","a"],"include":"Tokyo","exclude":"old","find":"Tokyo","replace":"JP"}}
+        ],"activeId":"c"});
+        let document = export(&serde_json::to_vec(&source).unwrap(), "Desktop").unwrap();
+        let summary = preview(&document).unwrap();
+        assert_eq!((summary.profiles, summary.collections), (3, 1));
+        let restored: Value = serde_json::from_slice(&merge(br#"{"profiles":[]}"#, &document).unwrap()).unwrap();
+        assert_eq!(restored["profiles"], source["profiles"]);
+        assert_eq!(restored["activeId"], "c");
+    }
+
     #[test]
     fn migrates_subscriptions_and_rules_only() {
         let original = br#"{"profiles":[{"id":"f","name":"X","url":"/source/private.yaml","raw":"example","sourceType":"file"}],"activeId":"f","selectedNodes":{"f":{"g":"n"}},"tunEnabled":true,"settings":{"controllerSecret":"source-secret","kernelPath":"/source","mixedPort":555,"customRules":["MATCH,DIRECT"]}}"#;

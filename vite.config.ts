@@ -9,7 +9,7 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 export default defineConfig({
   test: {
     // 审查基线和历史缺陷复现不是当前版本的回归测试。
-    exclude: [...configDefaults.exclude, '**/.superpowers/**', '**/docs/**', '**/.impeccable/**'],
+    exclude: [...configDefaults.exclude, '**/.superpowers/**', '**/docs/**', '**/.impeccable/**', '**/.cache/**'],
   },
   plugins: [react(), bundleBudget()],
   // QuickJS WASM 在 Worker 内按模块加载，生产构建也必须保留模块格式。

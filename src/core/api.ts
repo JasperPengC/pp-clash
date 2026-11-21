@@ -1,3 +1,4 @@
+import { shareSubscriptionDownload } from './subscription-download';
 import { invoke } from '@tauri-apps/api/core';
 import { DEFAULT_LATENCY_URL, GITHUB_LATENCY_URL } from './latency';
 import type { TrafficInfo } from './subscription';
@@ -35,7 +36,7 @@ export interface KernelStatus {
 }
 
 export interface WebDavConnection { endpoint: string; username: string; password: string }
-export interface WebDavBackupPreview { device: string; profiles: number; digest: string }
+export interface WebDavBackupPreview { device: string; profiles: number; collections: number; digest: string }
 export interface WebDavRestore { connection: WebDavConnection; name: string; digest: string; passphrase: string }
 
 export interface TrayNode {
@@ -457,8 +458,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 export const api = {
   androidAppInfo: () => call<{ version: string; build: number; abi: string; kernelVersion: string; debug: boolean }>('android_app_info'),
   androidSystemTheme: (light: boolean) => call<void>('android_system_theme', { light }),
-  fetchSubscription: (url: string, proxyPort?: number) =>
-    call<SubscriptionPayload>('fetch_subscription', { url, proxyPort }),
+  fetchSubscription: shareSubscriptionDownload((url, proxyPort) =>
+    call<SubscriptionPayload>('fetch_subscription', { url, proxyPort })),
 
   /** 读取本地 Clash/mihomo 配置文件（10MB 上限，仅 yaml/yml/json）。 */
   readSubscriptionFile: (path: string) => call<string>('read_subscription_file', { path }),

@@ -14,7 +14,7 @@ it.each([false, true])('连接、预览与明确确认恢复（移动布局 %s�
   const root = createRoot(host);
   const name = 'ppclash-1780000000000-00112233445566778899aabbccddeeff.ppbackup';
   const list = vi.spyOn(api, 'webdavList').mockResolvedValue(Array.from({ length: 11 }, (_, i) => i ? name.replace('1780000000000', String(1780000000000 - i)) : name));
-  const preview = vi.spyOn(api, 'webdavPreview').mockResolvedValue({ device: 'Mac', profiles: 2, digest: 'known-hash' });
+  const preview = vi.spyOn(api, 'webdavPreview').mockResolvedValue({ device: 'Mac', profiles: 2, collections: 1, digest: 'known-hash' });
   const restore = vi.fn().mockRejectedValue(new Error('备份已变化，请重新预览'));
   const original = useApp.getState().restoreBackup;
   useApp.setState({ restoreBackup: restore });
@@ -39,7 +39,7 @@ it.each([false, true])('连接、预览与明确确认恢复（移动布局 %s�
     await input('input[type="password"]', 'local test pass');
     await click('预览');
     expect(preview).toHaveBeenCalledWith(expect.any(Object), name, 'local test pass');
-    expect(document.body.textContent).toContain('2 个订阅');
+    expect(document.body.textContent).toContain('2 个订阅（含 1 个组合）');
     expect(restore).not.toHaveBeenCalled();
     await click('确认恢复');
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ name, digest: 'known-hash', passphrase: 'local test pass' }));

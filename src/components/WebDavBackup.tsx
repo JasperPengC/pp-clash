@@ -68,7 +68,7 @@ function BackupDialog({ trigger, onClose }: { trigger: HTMLElement | null; onClo
         <button type="button" className="icon-btn" aria-label="关闭云备份" disabled={!!busy} onClick={onClose}><IconX size={16} /></button></header>
       {selected ? <>
         <div className="webdav-summary"><strong>{selected.preview.device}</strong>
-          <span>{when(selected.name)} · {selected.preview.profiles} 个订阅</span></div>
+          <span>{when(selected.name)} · {selected.preview.profiles} 个订阅{selected.preview.collections > 0 && `（含 ${selected.preview.collections} 个组合）`}</span></div>
         <p>将替换订阅、节点选择和覆写。恢复前会在本机保留一份备份。</p>
         <div className="webdav-actions"><button className="btn" disabled={!!busy} onClick={() => { setSelected(null); setError(''); }}>返回</button>
           <button className="btn btn-primary" disabled={!!busy} onClick={() => void restore()}>确认恢复</button></div>

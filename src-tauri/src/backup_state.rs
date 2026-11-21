@@ -51,7 +51,16 @@ pub(crate) fn validate(state: &Value) -> Result<(), String> {
             fields(p, &["updatedAt"], number)?;
             fields(p, &["updateIntervalHours", "autoUpdateHours"], optional_number)?;
             booleans(p, &["useProxy"])?;
-            choice(p, "sourceType", &["url", "file"])?;
+            choice(p, "sourceType", &["url", "file", "collection"])?;
+            if p.get("sourceType").and_then(Value::as_str) == Some("collection") {
+                let recipe = object(p.get("collection").ok_or("组合订阅缺少处理规则")?)?;
+                required_strings(recipe, &["include", "exclude", "find", "replace"])?;
+                let sources = recipe.get("sources").and_then(Value::as_array).ok_or("组合来源格式错误")?;
+                let mut unique = HashSet::new();
+                if !(2..=32).contains(&sources.len()) || sources.iter().any(|v| !v.as_str().is_some_and(|s| !s.is_empty() && s != id && unique.insert(s))) {
+                    return Err("组合来源格式错误".into());
+                }
+            }
             if let Some(info) = p.get("userinfo").filter(|v| !v.is_null()) {
                 fields(object(info)?, &["upload", "download", "total", "expire"], number)?;
             }

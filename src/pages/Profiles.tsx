@@ -1,8 +1,9 @@
 import { PageHeader } from '../components/PageHeader';
+import { ProfileCollectionDialog } from '../components/ProfileCollectionDialog';
 import { Dialog } from '../components/Dialog';
 import { useEffect, useId, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { MiniSwitch, Select } from '../components/ui';
-import { IconAlert, IconCheck, IconChevronRight, IconEdit, IconFolder, IconPlus, IconProfiles, IconRefresh, IconSort, IconTrash, IconX } from '../components/icons';
+import { IconSliders, IconAlert, IconCheck, IconChevronRight, IconEdit, IconFolder, IconPlus, IconProfiles, IconRefresh, IconSort, IconTrash, IconX } from '../components/icons';
 import { useApp } from '../store/app';
 import type { Profile } from '../domain/app';
 import { isTauri, previewMode } from '../core/api';
@@ -22,6 +23,7 @@ const AUTO_OPTIONS = (followHours: number | null) => [
 ];
 
 function profileSource(profile: Profile): string {
+  if (profile.sourceType === 'collection') return `Sub-Store · ${profile.collection?.sources.length ?? 0} 个来源`;
   if (profile.sourceType === 'file') return profile.url ? '本地配置' : '备份副本 · 待关联本机文件';
   try { return new URL(profile.url).hostname; } catch { return '远程订阅'; }
 }
@@ -185,7 +187,8 @@ function ProfileCard({ profile, active, busy, nodeCount, refreshing, refreshErro
         title="删除订阅" disabled={busy} onClick={onDelete}><IconTrash size={16} /></button>
       </div>
     </div>
-    {editing && <ProfileEditor profile={profile} busy={busy} refreshing={refreshing} index={index} total={total}
+    {editing && profile.sourceType === 'collection' && <ProfileCollectionDialog profile={profile} onClose={onClose} />}
+    {editing && profile.sourceType !== 'collection' && <ProfileEditor profile={profile} busy={busy} refreshing={refreshing} index={index} total={total}
       onUpdate={onUpdate} onMove={onMove}
       onRefresh={onRefresh} returnFocus={editButton.current} onClose={onClose} />}
   </section>;
@@ -247,6 +250,7 @@ export function ProfilesPage() {
   const kernelError = useApp(s => s.kernelError);
   const transition = useApp(s => s.runtimeConfigTransition);
 
+  const [composing, setComposing] = useState(false);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -316,6 +320,7 @@ export function ProfilesPage() {
   return (
     <>
       <PageHeader title="订阅" className="profiles-page-header" subtitle={profiles.length > 0 ? `${profiles.length} 份订阅 · ${Object.values(nodeCounts).reduce((sum, count) => sum + count, 0)} 个节点` : '还没有订阅'} mobileSubtitle={`${profiles.length} 份`}>
+          {!isAndroid && <button type="button" className="icon-btn" aria-label="组合订阅" title="组合订阅 · Sub-Store" disabled={manageBusy} onClick={() => setComposing(true)}><IconSliders size={16} /></button>}
           {profiles.length > 1 && <button type="button" className="icon-btn" aria-label="订阅排序" title={ordering ? '完成排序' : '排序订阅'}
             aria-pressed={ordering} disabled={manageBusy} onClick={() => { setOrdering(value => !value); setEditingId(null); setConfirmId(null); }}><IconSort size={16} /></button>}
           {profiles.length > 1 && (
@@ -379,6 +384,7 @@ export function ProfilesPage() {
           )}
         </div>
       </div>
+      {composing && <ProfileCollectionDialog onClose={() => setComposing(false)} />}
       <SubscriptionImport visible={adding} busy={globalBusy} profiles={profiles}
         running={kernelPhase === 'running'} onClose={() => setAdding(false)}
         onImportUrl={importProfile} onImportFile={importProfileFile} />

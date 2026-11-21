@@ -1,3 +1,5 @@
+import { buildCollection, collectionSources } from '../application/profile-collection';
+import type { CollectionRecipe } from '../domain/app';
 import { isGroupNode, parseRuntimeGroups } from '../core/proxy-runtime';
 import { createStatePersistence } from '../application/persistence';
 import { createTrayPublisher } from '../application/tray-sync';
@@ -93,6 +95,7 @@ interface AppStore {
   restoreBackup: (backup: string | WebDavRestore) => Promise<void>;
   importProfile: (url: string, useProxy?: boolean) => Promise<boolean>;
   /** 导入本地 YAML/JSON 文件；url 字段保存文件路径，便于后续重新读取。 */
+  saveCollection: (name: string, recipe: CollectionRecipe, id?: string) => Promise<void>;
   importProfileFile: (path: string) => Promise<boolean>;
   activate: (id: string) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
@@ -838,7 +841,7 @@ export const useApp = create<AppStore>((set, get) => ({
 
       // 老版本导入的订阅没有订阅名和流量信息：后台补一次响应头（失败静默）
       const active = profiles.find((p) => p.id === saved.activeId);
-      if (active && !active.userinfo) {
+      if (active && active.sourceType !== 'collection' && !active.userinfo) {
         void get().refreshProfile(active.id, true);
       }
 
@@ -1002,6 +1005,31 @@ export const useApp = create<AppStore>((set, get) => ({
     } finally {
       set({ busy: configPending > 0, importing: false, importStage: null });
     }
+  },
+
+  saveCollection: async (name, recipe, id) => {
+    if (!name.trim() || name.length > 80) throw new Error('请输入不超过 80 字的组合名称');
+    const before = get();
+    if (before.busy || before.importing || before.activatingProfile || before.persistenceFrozen) throw new Error('请稍后重试');
+    if (id && before.activeId === id) throw new Error('请先切换到其他订阅，再编辑正在使用的组合');
+    const original = id ? before.profiles.find(p => p.id === id) : undefined;
+    if (id && original?.sourceType !== 'collection') throw new Error('订阅组合不存在');
+    const sources = collectionSources(before.profiles, recipe);
+    const token = lifecycle.token();
+    const current = () => lifecycle.current(token) && !get().persistenceFrozen && before.persistenceSession === get().persistenceSession
+      && sources.every(s => get().profiles.find(p => p.id === s.id) === s)
+      && (!id || (get().activeId !== id && get().profiles.find(p => p.id === id) === original));
+    set({ importing: true, busy: true, importStage: 'validating' });
+    try {
+      const { raw } = await buildCollection(sources, recipe, false);
+      if (!current()) throw new Error('来源订阅已变化，请重试');
+      const profile: Profile = { ...original, id: id ?? crypto.randomUUID(), name: name.trim(), sourceType: 'collection',
+        url: '', raw, updatedAt: Date.now(), userinfo: null, updateIntervalHours: null, collection: recipe };
+      await validateImportedProfile(get(), profile, current);
+      if (!current()) throw new Error('来源订阅已变化，请重试');
+      set(s => ({ profiles: id ? s.profiles.map(p => p.id === id ? profile : p) : [...s.profiles, profile] }));
+      await persist(get());
+    } finally { set({ importing: false, busy: configPending > 0, importStage: null }); }
   },
 
   importProfileFile: async (path) => {
@@ -1178,12 +1206,13 @@ export const useApp = create<AppStore>((set, get) => ({
       if (!quiet) before.notify('info', '已恢复订阅内容。请先在编辑订阅中选择本机文件，再更新。');
       return Promise.resolve(false);
     }
+    const dependencies = p.collection?.sources.map(key => before.profiles.find(source => source.id === key));
     const sourceKey = JSON.stringify(configInputsForProfile(before, p));
     let stale = false;
     let request: number | undefined;
     // 记录经过的变化，A→B→A 也不能让旧下载重新取得提交权。
     const unsubscribe = useApp.subscribe(s => {
-      if (s.profiles.find(x => x.id === id) !== p || s.activeId !== before.activeId
+      if (dependencies?.some(source => !source || s.profiles.find(x => x.id === source.id)?.url !== source.url) || s.profiles.find(x => x.id === id) !== p || s.activeId !== before.activeId
         || s.kernelPhase !== before.kernelPhase || s.connectedAt !== before.connectedAt
         || JSON.stringify(configInputsForProfile(s, p)) !== sourceKey) stale = true;
     });
@@ -1198,7 +1227,11 @@ export const useApp = create<AppStore>((set, get) => ({
       try {
         if (p.useProxy && before.kernelPhase !== 'running' && !quiet) get().notify('info', '内核未运行，直连更新');
         const proxyPort = p.useProxy && before.kernelPhase === 'running' ? before.settings.mixedPort : undefined;
-        const payload = p.sourceType === 'file'
+        const payload = p.sourceType === 'collection' && p.collection
+          ? { raw: (await buildCollection(collectionSources(before.profiles, p.collection), p.collection, true,
+              before.kernelPhase === 'running' ? before.settings.mixedPort : undefined)).raw, profileTitle: null,
+              contentDisposition: null, subscriptionUserinfo: null, profileUpdateInterval: null }
+          : p.sourceType === 'file'
           ? { raw: await api.readSubscriptionFile(p.url), profileTitle: null, contentDisposition: null,
             subscriptionUserinfo: null, profileUpdateInterval: null }
           : await api.fetchSubscription(p.url, proxyPort);

@@ -4,6 +4,8 @@ import type { TargetLatencies } from '../core/latency';
 import type { TextSize, ThemeMode } from './appearance';
 export type { TextSize, ThemeMode } from './appearance';
 
+export interface CollectionRecipe { sources: string[]; include: string; exclude: string; find: string; replace: string }
+
 export interface Profile {
   id: string;
   /** 优先用订阅响应头里的名字；没有则回落到 URL 主机名。 */
@@ -20,7 +22,8 @@ export interface Profile {
   /** 更新订阅时走本机代理（需要内核运行）。 */
   useProxy?: boolean;
   /** 来源：远程订阅链接或本地文件；旧数据没有该字段时按 url 处理。 */
-  sourceType?: 'url' | 'file';
+  sourceType?: 'url' | 'file' | 'collection';
+  collection?: CollectionRecipe;
   /** 订阅规则的启停/目标/排序覆盖。 */
   ruleEdits?: RuleEditState;
 }
