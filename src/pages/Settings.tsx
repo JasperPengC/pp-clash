@@ -9,6 +9,7 @@ import { api, DATA_DIR, isTauri } from '../core/api';
 import { isWindows } from '../core/platform';
 import { APP_VERSION, UPDATE_REPO } from '../core/update';
 import { TEXT_SIZES } from '../store/text-size';
+import { WebDavBackup } from '../components/WebDavBackup';
 
 const SETTINGS_CATEGORIES = ['外观', '连接与后台', '下载', '备份与恢复', '诊断与日志', '应用更新', '页面与订阅'];
 const SettingsFilter = createContext({ query: '', category: '全部' });
@@ -403,6 +404,7 @@ export function SettingsPage() {
             </Section>
 
             <Section title="备份与恢复" desc="恢复会替换订阅、覆写与应用设置；恢复前自动保留当前备份">
+              <Row label="WebDAV 云备份" hint="在设备之间迁移订阅和覆写" control={<WebDavBackup />} />
               <Row
                 label="立即备份"
                 hint="保存到 backups/"

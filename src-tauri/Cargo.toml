@@ -23,6 +23,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tauri-plugin-dialog = "2"
 zip = "2"
 sha2 = "0.10"
+ring = "0.17"
+zeroize = "1"
+quick-xml = { version = "0.42", features = ["serialize"] }
+uuid = { version = "1", features = ["v4"] }
 regex = "1"
 flate2 = "1"
 tempfile = "3"

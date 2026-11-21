@@ -34,6 +34,10 @@ export interface KernelStatus {
   reclaimed?: number[];
 }
 
+export interface WebDavConnection { endpoint: string; username: string; password: string }
+export interface WebDavBackupPreview { device: string; profiles: number; digest: string }
+export interface WebDavRestore { connection: WebDavConnection; name: string; digest: string; passphrase: string }
+
 export interface TrayNode {
   name: string;
   delay: number | null;
@@ -626,6 +630,12 @@ export const api = {
 
   /** 备份当前 state.json 到数据目录 backups/。 */
   backupAppState: (dataDir: string) => call<string>('backup_app_state', { dataDir }),
+  webdavList: (connection: WebDavConnection) => call<string[]>('webdav_list', { connection }),
+  webdavUpload: (connection: WebDavConnection, passphrase: string, device: string) =>
+    call<string>('webdav_upload', { connection, passphrase, device }),
+  webdavPreview: (connection: WebDavConnection, name: string, passphrase: string) =>
+    call<WebDavBackupPreview>('webdav_preview', { connection, name, passphrase }),
+  webdavRestore: (backup: WebDavRestore, session: string) => call<void>('webdav_restore', { ...backup, session }),
 
   /** 已有备份列表（新的在前）。 */
   listBackups: (dataDir: string) =>

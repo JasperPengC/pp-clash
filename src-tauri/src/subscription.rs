@@ -372,6 +372,32 @@ pub fn backup_app_state(data_dir: String) -> Result<String, String> {
     crate::backup_state::snapshot(&backups, "state-", &backup)
 }
 
+pub(crate) fn portable_state_bytes(dir: &Path) -> Result<Vec<u8>, String> {
+    let persistence = state_persistence(dir)?;
+    let _state = persistence.lock().map_err(|_| "状态事务锁不可用")?;
+    crate::backup_state::read_regular(&dir.join("state.json"))
+}
+
+pub(crate) fn restore_portable(dir: &Path, incoming: &[u8], session: &str) -> Result<(), String> {
+    let persistence = state_persistence(dir)?;
+    let mut state = persistence.lock().map_err(|_| "状态事务锁不可用")?;
+    if state.sessions.get(session) != Some(&state.generation) { return Err("状态会话已变更，请重新打开备份".into()); }
+    let target = dir.join("state.json");
+    let previous = match std::fs::symlink_metadata(&target) {
+        Ok(_) => Some(crate::backup_state::read_regular(&target)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("读取本机状态失败：{e}")),
+    };
+    let merged = crate::portable_backup::merge(previous.as_deref().unwrap_or(br#"{"profiles":[]}"#), incoming)?;
+    if let Some(previous) = previous {
+        let backups = backups_dir(dir.to_str().ok_or("无效状态目录")?)?;
+        crate::backup_state::snapshot(&backups, "state-before-", &previous)?;
+    }
+    crate::backup_state::replace(&target, &merged)?;
+    state.generation += 1;
+    Ok(())
+}
+
 /// 列出已有备份（新的在前）。
 #[tauri::command]
 pub fn list_backups(data_dir: String) -> Result<Vec<BackupEntry>, String> {

@@ -1,0 +1,16 @@
+.modal-card:has(.webdav-backup) { width: min(440px, calc(100vw - 32px)); max-height: min(80dvh, 640px); overflow-y: auto; }
+.webdav-backup, .webdav-backup form, .webdav-backup label, .webdav-summary { display: grid; gap: 10px; min-width: 0; }
+.webdav-backup { gap: 14px; }
+.webdav-backup header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.webdav-backup h3 { font-size: var(--type-section); }
+.webdav-backup h3, .webdav-backup p, .webdav-backup ul { margin: 0; }
+.webdav-backup label, .webdav-backup p, .webdav-summary span { font-size: .875rem; }
+.webdav-backup label { gap: 4px; }
+.webdav-backup input { width: 100%; min-width: 0; }
+.webdav-backup p, .webdav-summary span { color: var(--text-secondary); }
+.webdav-backup [role="alert"] { color: var(--danger); }
+.webdav-summary { gap: 4px; overflow-wrap: anywhere; }
+.webdav-actions, .webdav-row, .webdav-backup li { display: flex; align-items: center; gap: 8px; }
+.webdav-actions { justify-content: flex-end; }
+.webdav-row, .webdav-backup li { justify-content: space-between; }
+.webdav-backup ul { display: grid; gap: 6px; padding: 0; list-style: none; }

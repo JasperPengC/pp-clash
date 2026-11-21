@@ -7,6 +7,7 @@ import { api, isTauri } from '../core/api';
 import { APP_VERSION, UPDATE_REPO } from '../core/update';
 import type { ThemeMode } from '../domain/app';
 import { useApp } from '../store/app';
+import { WebDavBackup } from '../components/WebDavBackup';
 
 export function AndroidSettings({ tools }: { tools: ReactNode }) {
   const settings = useApp(s => s.settings);
@@ -44,6 +45,9 @@ export function AndroidSettings({ tools }: { tools: ReactNode }) {
       <section className="android-settings-group" aria-label="网络工具">
         <h2>网络工具</h2>
         <div className="android-settings-card android-list">{tools}</div>
+      </section>
+      <section className="android-settings-group" aria-label="备份与恢复">
+        <h2>备份与恢复</h2><div className="android-settings-card"><WebDavBackup mobile /></div>
       </section>
       <section className="android-settings-group" aria-label="应用更新">
         <h2>应用更新</h2>

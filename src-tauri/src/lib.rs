@@ -15,6 +15,10 @@ use tauri::{Emitter, Manager, WindowEvent};
 use tauri::ActivationPolicy;
 
 mod backup_state;
+mod backup_cipher;
+mod portable_backup;
+mod webdav;
+mod webdav_commands;
 mod mihomo;
 mod platform;
 mod subscription;
@@ -133,6 +137,10 @@ pub fn run() {
             subscription::backup_app_state,
             subscription::list_backups,
             subscription::restore_backup,
+            webdav_commands::webdav_list,
+            webdav_commands::webdav_upload,
+            webdav_commands::webdav_preview,
+            webdav_commands::webdav_restore,
             mihomo::mihomo_request,
             sysproxy::set_system_proxy,
             sysproxy::get_system_proxy,

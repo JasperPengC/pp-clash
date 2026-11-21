@@ -22,7 +22,7 @@ const AUTO_OPTIONS = (followHours: number | null) => [
 ];
 
 function profileSource(profile: Profile): string {
-  if (profile.sourceType === 'file') return '本地配置';
+  if (profile.sourceType === 'file') return profile.url ? '本地配置' : '备份副本 · 待关联本机文件';
   try { return new URL(profile.url).hostname; } catch { return '远程订阅'; }
 }
 

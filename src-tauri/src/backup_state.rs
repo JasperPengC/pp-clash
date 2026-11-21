@@ -35,7 +35,7 @@ fn required_strings(map: &Object, keys: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate(state: &Value) -> Result<(), String> {
+pub(crate) fn validate(state: &Value) -> Result<(), String> {
     let root = object(state)?;
     if !root.contains_key("profiles") && !root.contains_key("settings") {
         return Err("不是 PP Clash 状态备份".into());

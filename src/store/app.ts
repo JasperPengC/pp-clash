@@ -11,7 +11,7 @@ import { createSettingsApplication, type SettingsApplicationOptions, type Settin
 import { Lifecycle } from '../core/lifecycle';
 import { api, DATA_DIR, isTauri, setMihomoBase, setMihomoSecret } from '../core/api';
 import { generateConfig, type ConfigStats, type RuleEditState } from '../core/generator';
-import type { AppUpdateInfo } from '../core/api';
+import type { AppUpdateInfo, WebDavRestore } from '../core/api';
 import type { Finding } from '../core/audit';
 import { DEFAULT_POLICY, type SecurityPolicy } from '../core/security';
 import { countRealNodes, parseSubscriptionMeta, validateSubscriptionCandidate } from '../core/subscription';
@@ -90,7 +90,7 @@ interface AppStore {
 
   /** 启动时从磁盘水合。 */
   hydrate: () => Promise<void>;
-  restoreBackup: (name: string) => Promise<void>;
+  restoreBackup: (backup: string | WebDavRestore) => Promise<void>;
   importProfile: (url: string, useProxy?: boolean) => Promise<boolean>;
   /** 导入本地 YAML/JSON 文件；url 字段保存文件路径，便于后续重新读取。 */
   importProfileFile: (path: string) => Promise<boolean>;
@@ -687,12 +687,18 @@ export const useApp = create<AppStore>((set, get) => ({
 
   clearToast: () => set({ toast: null }),
 
-  restoreBackup: async (name) => {
+  restoreBackup: async (backup) => {
     if (get().persistenceFrozen) throw new Error('状态正在读取或恢复，请稍后重试');
     set({ persistenceFrozen: true, restoringBackup: true });
     persistenceRevision++;
     try {
-      await api.restoreBackup(DATA_DIR, name);
+      if (typeof backup === 'string') {
+        await api.restoreBackup(DATA_DIR, backup);
+      } else {
+        const session = get().persistenceSession;
+        if (!session) throw new Error('请在应用载入完成后恢复');
+        await api.webdavRestore(backup, session);
+      }
       // 恢复成功后旧内存保持只读，只有完整水合恢复态才重新获得写权限。
       set({ persistenceSession: undefined, persistenceFrozen: true, restoredStatePending: true, restoringBackup: false });
     } catch (error) {
@@ -1168,6 +1174,10 @@ export const useApp = create<AppStore>((set, get) => ({
     const before = get();
     const p = before.profiles.find(x => x.id === id);
     if (!p || !isTauri) return Promise.resolve(false);
+    if (p.sourceType === 'file' && !p.url) {
+      if (!quiet) before.notify('info', '已恢复订阅内容。请先在编辑订阅中选择本机文件，再更新。');
+      return Promise.resolve(false);
+    }
     const sourceKey = JSON.stringify(configInputsForProfile(before, p));
     let stale = false;
     let request: number | undefined;
