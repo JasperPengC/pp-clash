@@ -17,20 +17,32 @@ fn fields(map: &Object, names: &[&str], valid: fn(&Value) -> bool) -> Result<(),
     }
     Ok(())
 }
-fn strings(map: &Object, names: &[&str]) -> Result<(), String> { fields(map, names, Value::is_string) }
-fn booleans(map: &Object, names: &[&str]) -> Result<(), String> { fields(map, names, Value::is_boolean) }
-fn number(v: &Value) -> bool { v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0) }
-fn optional_number(v: &Value) -> bool { v.is_null() || number(v) }
+fn strings(map: &Object, names: &[&str]) -> Result<(), String> {
+    fields(map, names, Value::is_string)
+}
+fn booleans(map: &Object, names: &[&str]) -> Result<(), String> {
+    fields(map, names, Value::is_boolean)
+}
+fn number(v: &Value) -> bool {
+    v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
+}
+fn optional_number(v: &Value) -> bool {
+    v.is_null() || number(v)
+}
 fn choice(map: &Object, key: &str, values: &[&str]) -> Result<(), String> {
     fields(map, &[key], Value::is_string)?;
     if let Some(v) = map.get(key).and_then(Value::as_str) {
-        if !values.contains(&v) { return Err(format!("不支持的备份字段 {key}")); }
+        if !values.contains(&v) {
+            return Err(format!("不支持的备份字段 {key}"));
+        }
     }
     Ok(())
 }
 fn required_strings(map: &Object, keys: &[&str]) -> Result<(), String> {
     for key in keys {
-        if map.get(*key).and_then(Value::as_str).is_none() { return Err(format!("备份缺少有效字段 {key}")); }
+        if map.get(*key).and_then(Value::as_str).is_none() {
+            return Err(format!("备份缺少有效字段 {key}"));
+        }
     }
     Ok(())
 }
@@ -47,30 +59,62 @@ pub(crate) fn validate(state: &Value) -> Result<(), String> {
             let p = object(profile)?;
             required_strings(p, &["id", "name", "url", "raw"])?;
             let id = p["id"].as_str().unwrap();
-            if id.is_empty() || !ids.insert(id) { return Err("订阅标识为空或重复".into()); }
+            if id.is_empty() || !ids.insert(id) {
+                return Err("订阅标识为空或重复".into());
+            }
             fields(p, &["updatedAt"], number)?;
-            fields(p, &["updateIntervalHours", "autoUpdateHours"], optional_number)?;
+            fields(
+                p,
+                &["updateIntervalHours", "autoUpdateHours"],
+                optional_number,
+            )?;
             booleans(p, &["useProxy"])?;
-            choice(p, "sourceType", &["url", "file", "collection"])?;
+            choice(p, "sourceType", &["url", "file", "collection", "substore"])?;
+            if p.get("sourceType").and_then(Value::as_str) == Some("substore") {
+                let reference = object(p.get("subStore").ok_or("Sub-Store 订阅缺少来源关联")?)?;
+                required_strings(reference, &["kind", "name"])?;
+                choice(reference, "kind", &["sub", "collection"])?;
+                if reference["name"].as_str().unwrap().trim().is_empty() {
+                    return Err("Sub-Store 来源名称为空".into());
+                }
+            }
             if p.get("sourceType").and_then(Value::as_str) == Some("collection") {
                 let recipe = object(p.get("collection").ok_or("组合订阅缺少处理规则")?)?;
                 required_strings(recipe, &["include", "exclude", "find", "replace"])?;
-                let sources = recipe.get("sources").and_then(Value::as_array).ok_or("组合来源格式错误")?;
+                let sources = recipe
+                    .get("sources")
+                    .and_then(Value::as_array)
+                    .ok_or("组合来源格式错误")?;
                 let mut unique = HashSet::new();
-                if !(2..=32).contains(&sources.len()) || sources.iter().any(|v| !v.as_str().is_some_and(|s| !s.is_empty() && s != id && unique.insert(s))) {
+                if !(2..=32).contains(&sources.len())
+                    || sources.iter().any(|v| {
+                        !v.as_str()
+                            .is_some_and(|s| !s.is_empty() && s != id && unique.insert(s))
+                    })
+                {
                     return Err("组合来源格式错误".into());
                 }
             }
             if let Some(info) = p.get("userinfo").filter(|v| !v.is_null()) {
-                fields(object(info)?, &["upload", "download", "total", "expire"], number)?;
+                fields(
+                    object(info)?,
+                    &["upload", "download", "total", "expire"],
+                    number,
+                )?;
             }
             if let Some(edits) = p.get("ruleEdits") {
                 let edits = object(edits)?;
-                if !edits.get("order").and_then(Value::as_array).is_some_and(|a| a.iter().all(|v| v.as_u64().is_some())) {
+                if !edits
+                    .get("order")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| a.iter().all(|v| v.as_u64().is_some()))
+                {
                     return Err("规则顺序格式无效".into());
                 }
                 for (index, edit) in object(edits.get("edits").ok_or("缺少规则编辑")?)? {
-                    if index.parse::<u64>().is_err() { return Err("规则索引无效".into()); }
+                    if index.parse::<u64>().is_err() {
+                        return Err("规则索引无效".into());
+                    }
                     booleans(object(edit)?, &["enabled"])?;
                     strings(object(edit)?, &["target"])?;
                 }
@@ -78,56 +122,137 @@ pub(crate) fn validate(state: &Value) -> Result<(), String> {
         }
     }
     if let Some(active) = root.get("activeId").filter(|v| !v.is_null()) {
-        if !active.as_str().is_some_and(|id| ids.contains(id)) { return Err("活动订阅引用不存在".into()); }
+        if !active.as_str().is_some_and(|id| ids.contains(id)) {
+            return Err("活动订阅引用不存在".into());
+        }
     }
     if let Some(policy) = root.get("policy") {
-        booleans(object(policy)?, &["dnsLeakProtection", "fakeIp", "ipv6", "blockWebRtc", "tunStrictRoute", "blockQuic"])?;
+        booleans(
+            object(policy)?,
+            &[
+                "dnsLeakProtection",
+                "fakeIp",
+                "ipv6",
+                "blockWebRtc",
+                "tunStrictRoute",
+                "blockQuic",
+            ],
+        )?;
     }
     if let Some(pins) = root.get("pinnedNodes") {
         for names in object(pins)?.values() {
-            if !names.as_array().is_some_and(|a| a.iter().all(Value::is_string)) { return Err("收藏节点格式无效".into()); }
+            if !names
+                .as_array()
+                .is_some_and(|a| a.iter().all(Value::is_string))
+            {
+                return Err("收藏节点格式无效".into());
+            }
         }
     }
     for key in ["fixedNodes", "selectedNodes"] {
         if let Some(records) = root.get(key) {
             for (id, groups) in object(records)? {
-                if !ids.contains(id.as_str()) { return Err(format!("{key} 引用不存在的订阅")); }
-                if !object(groups)?.values().all(Value::is_string) { return Err(format!("{key} 格式无效")); }
+                if !ids.contains(id.as_str()) {
+                    return Err(format!("{key} 引用不存在的订阅"));
+                }
+                if !object(groups)?.values().all(Value::is_string) {
+                    return Err(format!("{key} 格式无效"));
+                }
             }
         }
     }
     if let Some(settings) = root.get("settings") {
         let s = object(settings)?;
-        strings(s, &["controllerSecret", "kernelPath", "bindAddress", "authUser", "authPass", "dnsCustom", "githubProxy", "egressGuardNode", "updateFeedUrl", "overrideText"])?;
-        booleans(s, &["launchAtLogin", "closeToTray", "allowLan", "advancedMode", "traySpeed", "hideDockOnClose", "geoAutoUpdate", "snifferEnabled", "snifferOverrideDestination", "autoUpdate", "autoFailover", "stableRouting", "egressGuard", "updateCheckOnLaunch", "overrideEnabled"])?;
-        fields(s, &["mixedPort", "controllerPort", "dnsPort", "socksPort", "httpPort", "redirPort"], |v| v.as_u64().is_some_and(|n| n <= 65535))?;
-        fields(s, &["settingsVersion"], |v| v.as_u64().is_some_and(|n| n <= 3))?;
+        strings(
+            s,
+            &[
+                "controllerSecret",
+                "kernelPath",
+                "bindAddress",
+                "authUser",
+                "authPass",
+                "dnsCustom",
+                "githubProxy",
+                "egressGuardNode",
+                "updateFeedUrl",
+                "overrideText",
+            ],
+        )?;
+        booleans(
+            s,
+            &[
+                "launchAtLogin",
+                "closeToTray",
+                "allowLan",
+                "advancedMode",
+                "traySpeed",
+                "hideDockOnClose",
+                "geoAutoUpdate",
+                "snifferEnabled",
+                "snifferOverrideDestination",
+                "autoUpdate",
+                "autoFailover",
+                "stableRouting",
+                "egressGuard",
+                "updateCheckOnLaunch",
+                "overrideEnabled",
+            ],
+        )?;
+        fields(
+            s,
+            &[
+                "mixedPort",
+                "controllerPort",
+                "dnsPort",
+                "socksPort",
+                "httpPort",
+                "redirPort",
+            ],
+            |v| v.as_u64().is_some_and(|n| n <= 65535),
+        )?;
+        fields(s, &["settingsVersion"], |v| {
+            v.as_u64().is_some_and(|n| n <= 3)
+        })?;
         fields(s, &["geoUpdateInterval"], number)?;
         choice(s, "theme", &["system", "light", "dark"])?;
         choice(s, "textSize", &["standard", "larger", "large"])?;
         choice(s, "mode", &["rule", "global", "direct"])?;
         choice(s, "geoDataMode", &["db", "dat"])?;
-        choice(s, "dnsNameserver", &["auto", "cloudflare", "google", "quad9", "custom"])?;
+        choice(
+            s,
+            "dnsNameserver",
+            &["auto", "cloudflare", "google", "quad9", "custom"],
+        )?;
         choice(s, "overrideMode", &["yaml", "js"])?;
         if let Some(urls) = s.get("geoUrls") {
-            if !object(urls)?.values().all(Value::is_string) { return Err("资源地址格式无效".into()); }
+            if !object(urls)?.values().all(Value::is_string) {
+                return Err("资源地址格式无效".into());
+            }
         }
         if let Some(overrides) = s.get("overrides") {
             let mut ids = HashSet::new();
             for file in overrides.as_array().ok_or("覆写应为数组")? {
                 let f = object(file)?;
                 required_strings(f, &["id", "name", "text", "mode"])?;
-                if !ids.insert(f["id"].as_str().unwrap()) { return Err("覆写标识重复".into()); }
+                if !ids.insert(f["id"].as_str().unwrap()) {
+                    return Err("覆写标识重复".into());
+                }
                 choice(f, "mode", &["yaml", "js"])?;
-                if !f.get("enabled").is_some_and(Value::is_boolean) { return Err("覆写 enabled 无效".into()); }
+                if !f.get("enabled").is_some_and(Value::is_boolean) {
+                    return Err("覆写 enabled 无效".into());
+                }
             }
         }
         if let Some(rules) = s.get("customRules") {
             for rule in rules.as_array().ok_or("规则应为数组")? {
-                if rule.is_string() { continue; } // 旧版本按字符串保存规则。
+                if rule.is_string() {
+                    continue;
+                } // 旧版本按字符串保存规则。
                 let rule = object(rule)?;
                 required_strings(rule, &["id", "type", "payload", "target"])?;
-                if !rule.get("enabled").is_some_and(Value::is_boolean) { return Err("规则 enabled 无效".into()); }
+                if !rule.get("enabled").is_some_and(Value::is_boolean) {
+                    return Err("规则 enabled 无效".into());
+                }
             }
         }
     }
@@ -136,10 +261,18 @@ pub(crate) fn validate(state: &Value) -> Result<(), String> {
 
 pub fn read_regular(path: &Path) -> Result<Vec<u8>, String> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| format!("读取备份失败：{e}"))?;
-    if !meta.file_type().is_file() || meta.len() > MAX_BYTES { return Err("备份必须为不超过64MB的普通文件".into()); }
+    if !meta.file_type().is_file() || meta.len() > MAX_BYTES {
+        return Err("备份必须为不超过64MB的普通文件".into());
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path).map_err(|e| e.to_string())?.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_BYTES { return Err("备份超过64MB".into()); }
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("备份超过64MB".into());
+    }
     Ok(bytes)
 }
 
@@ -148,7 +281,9 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let doc: Value = serde_json::from_slice(bytes).map_err(|e| format!("备份JSON无效：{e}"))?;
     let obj = object(&doc)?;
     if obj.contains_key("format") || obj.contains_key("version") || obj.contains_key("state") {
-        if doc["format"] != "ppclash-state" || doc["version"] != 1 { return Err("不支持的备份格式或版本".into()); }
+        if doc["format"] != "ppclash-state" || doc["version"] != 1 {
+            return Err("不支持的备份格式或版本".into());
+        }
         validate(&doc["state"])?;
         serde_json::to_vec(&doc["state"]).map_err(|e| e.to_string())
     } else {
@@ -160,21 +295,35 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
 pub fn encode(state: &[u8]) -> Result<Vec<u8>, String> {
     let state: Value = serde_json::from_slice(state).map_err(|e| e.to_string())?;
     validate(&state)?;
-    serde_json::to_vec(&serde_json::json!({"format": "ppclash-state", "version": 1, "state": state})).map_err(|e| e.to_string())
+    serde_json::to_vec(
+        &serde_json::json!({"format": "ppclash-state", "version": 1, "state": state}),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// persist覆盖使用同目录原子替换；失败时旧目标保留，临时文件由RAII删除。
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("无效状态目录")?;
     let mut temporary = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
-    temporary.write_all(bytes).and_then(|_| temporary.as_file().sync_all()).map_err(|e| e.to_string())?;
-    temporary.persist(path).map_err(|e| format!("替换状态失败，原文件保留：{}", e.error))?;
+    temporary
+        .write_all(bytes)
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
+    temporary
+        .persist(path)
+        .map_err(|e| format!("替换状态失败，原文件保留：{}", e.error))?;
     Ok(())
 }
 
 pub fn snapshot(dir: &Path, prefix: &str, bytes: &[u8]) -> Result<String, String> {
-    let mut file = tempfile::Builder::new().prefix(prefix).suffix(".json").tempfile_in(dir).map_err(|e| e.to_string())?;
-    file.write_all(bytes).and_then(|_| file.as_file().sync_all()).map_err(|e| e.to_string())?;
+    let mut file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".json")
+        .tempfile_in(dir)
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .and_then(|_| file.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
     let (_, path) = file.keep().map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -202,9 +351,13 @@ mod tests {
         replace(&target, b"new").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 

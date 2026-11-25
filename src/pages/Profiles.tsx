@@ -23,6 +23,7 @@ const AUTO_OPTIONS = (followHours: number | null) => [
 ];
 
 function profileSource(profile: Profile): string {
+  if (profile.sourceType === 'substore') return `Sub-Store · ${profile.subStore?.kind === 'collection' ? '组合' : '来源'} · ${profile.subStore?.name ?? '来源待确认'}`;
   if (profile.sourceType === 'collection') return `Sub-Store · ${profile.collection?.sources.length ?? 0} 个来源`;
   if (profile.sourceType === 'file') return profile.url ? '本地配置' : '备份副本 · 待关联本机文件';
   try { return new URL(profile.url).hostname; } catch { return '远程订阅'; }
@@ -73,6 +74,7 @@ function ProfileEditor({ profile, busy, refreshing, index, total, onUpdate, onMo
   const [saved, setSaved] = useState(false);
   const sourceInput = useRef<HTMLInputElement>(null);
   const local = profile.sourceType === 'file';
+  const subStore = profile.sourceType === 'substore';
   const changed = source.trim() !== profile.url || hours !== (profile.autoUpdateHours ?? null) || proxy !== Boolean(profile.useProxy);
   useEffect(() => { sourceInput.current?.focus(); }, []);
 
@@ -92,21 +94,22 @@ function ProfileEditor({ profile, busy, refreshing, index, total, onUpdate, onMo
     <div className="profiles-page profile-editor-dialog">
     <form className="sub-editor" aria-label={`编辑 ${profile.name}`} onSubmit={event => {
     event.preventDefault();
-    if (busy || picking || !source.trim()) return;
-    onUpdate({ url: source.trim(), autoUpdateHours: hours, useProxy: proxy });
+    if (busy || picking || (!subStore && !source.trim())) return;
+    onUpdate(subStore ? { autoUpdateHours: hours } : { url: source.trim(), autoUpdateHours: hours, useProxy: proxy });
     setSaved(true);
   }}>
     <div className="sub-editor-heading"><div className="sub-editor-title"><h3 id={headingId}>编辑订阅</h3><span title={profile.name}>{profile.name}</span></div>
       <button type="button" className="icon-btn" aria-label="关闭订阅编辑" disabled={busy || picking} onClick={onClose}><IconX size={16} /></button></div>
-    <label className="sub-editor-field"><span>{local ? '本地文件' : '订阅 URL'}</span>
+    <label className="sub-editor-field"><span>{subStore ? 'Sub-Store 来源' : local ? '本地文件' : '订阅 URL'}</span>
       <div className="sub-source-field">
-        <input ref={sourceInput} className="input" type={local ? 'text' : 'url'} required
-          pattern={local ? undefined : 'https?://.+'} readOnly={local} disabled={busy || picking}
-          aria-label={local ? '本地文件路径' : '订阅 URL'} value={source} spellCheck={false}
+        <input ref={sourceInput} className="input" type={local || subStore ? 'text' : 'url'} required={!subStore}
+          pattern={local || subStore ? undefined : 'https?://.+'} readOnly={local || subStore} disabled={busy || picking}
+          aria-label={subStore ? 'Sub-Store 来源' : local ? '本地文件路径' : '订阅 URL'} value={subStore ? profile.subStore?.name ?? '' : source} spellCheck={false}
           onChange={event => { setSource(event.target.value); setSaved(false); }} />
         {local && <button type="button" className="btn" disabled={!isTauri || busy || picking} onClick={() => void replaceFile()}>
           <IconFolder size={14} />{picking ? '选择中…' : '更换文件'}
         </button>}
+        {subStore && <button type="button" className="btn" disabled={busy || picking} onClick={() => { onClose(); window.dispatchEvent(new CustomEvent('ppclash:nav', { detail: 'substore' })); }}>管理来源</button>}
       </div>
     </label>
     <div className="sub-editor-settings">
@@ -115,7 +118,7 @@ function ProfileEditor({ profile, busy, refreshing, index, total, onUpdate, onMo
         options={AUTO_OPTIONS(profile.updateIntervalHours)} ariaLabel="自动更新间隔"
         onChange={value => { setHours(value === 'auto' ? null : value === 'off' ? 0 : Number(value)); setSaved(false); }} />
       </div>
-      {!local && <div className="sub-editor-setting"><span>使用代理更新</span>
+      {!local && !subStore && <div className="sub-editor-setting"><span>使用代理更新</span>
         <MiniSwitch on={proxy} disabled={busy || picking} label="经代理更新" onChange={value => { setProxy(value); setSaved(false); }} />
       </div>}
       <div className="sub-editor-setting"><span>订阅顺序 <span className="sub-order-index">{index + 1} / {total}</span></span>
@@ -125,7 +128,7 @@ function ProfileEditor({ profile, busy, refreshing, index, total, onUpdate, onMo
         </div>
       </div>
     </div>
-    <p className={`sub-editor-hint${saved ? ' sub-editor-saved' : ''}`} role="status">{saved ? '修改已保存，可以更新订阅。' : '保存来源后再更新；更新失败时保留上次可用配置。'}</p>
+    <p className={`sub-editor-hint${saved ? ' sub-editor-saved' : ''}`} role="status">{saved ? '修改已保存，可以更新订阅。' : subStore ? '更新时从 Sub-Store 重新生成。来源和处理器在 Sub-Store 中编辑，失败保留上次可用配置。' : '保存来源后再更新；更新失败时保留上次可用配置。'}</p>
     <div className="sub-editor-footer">
       <div className="sub-editor-tools">
         <button type="button" className="icon-btn" aria-label="更新订阅" aria-busy={refreshing}
@@ -135,7 +138,7 @@ function ProfileEditor({ profile, busy, refreshing, index, total, onUpdate, onMo
       </div>
       <div className="sub-editor-controls">
         <button type="button" className="btn btn-ghost" disabled={busy || picking} onClick={onClose}>取消编辑</button>
-        <button type="submit" className="btn btn-primary" disabled={busy || picking || !source.trim() || !changed}>保存修改</button>
+        <button type="submit" className="btn btn-primary" disabled={busy || picking || (!subStore && !source.trim()) || !changed}>保存修改</button>
       </div>
     </div>
   </form>
@@ -320,7 +323,7 @@ export function ProfilesPage() {
   return (
     <>
       <PageHeader title="订阅" className="profiles-page-header" subtitle={profiles.length > 0 ? `${profiles.length} 份订阅 · ${Object.values(nodeCounts).reduce((sum, count) => sum + count, 0)} 个节点` : '还没有订阅'} mobileSubtitle={`${profiles.length} 份`}>
-          {!isAndroid && <button type="button" className="icon-btn" aria-label="组合订阅" title="组合订阅 · Sub-Store" disabled={manageBusy} onClick={() => setComposing(true)}><IconSliders size={16} /></button>}
+          <button type="button" className="icon-btn" aria-label="组合订阅" title="组合订阅 · Sub-Store" disabled={manageBusy} onClick={() => setComposing(true)}><IconSliders size={16} /></button>
           {profiles.length > 1 && <button type="button" className="icon-btn" aria-label="订阅排序" title={ordering ? '完成排序' : '排序订阅'}
             aria-pressed={ordering} disabled={manageBusy} onClick={() => { setOrdering(value => !value); setEditingId(null); setConfirmId(null); }}><IconSort size={16} /></button>}
           {profiles.length > 1 && (

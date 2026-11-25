@@ -5,6 +5,7 @@ import type { TextSize, ThemeMode } from './appearance';
 export type { TextSize, ThemeMode } from './appearance';
 
 export interface CollectionRecipe { sources: string[]; include: string; exclude: string; find: string; replace: string }
+export interface SubStoreReference { kind: 'sub' | 'collection'; name: string }
 
 export interface Profile {
   id: string;
@@ -22,8 +23,10 @@ export interface Profile {
   /** 更新订阅时走本机代理（需要内核运行）。 */
   useProxy?: boolean;
   /** 来源：远程订阅链接或本地文件；旧数据没有该字段时按 url 处理。 */
-  sourceType?: 'url' | 'file' | 'collection';
+  sourceType?: 'url' | 'file' | 'collection' | 'substore';
   collection?: CollectionRecipe;
+  /** 内置服务中的真实来源关联；raw 只保存最后成功生成的配置。 */
+  subStore?: SubStoreReference;
   /** 订阅规则的启停/目标/排序覆盖。 */
   ruleEdits?: RuleEditState;
 }

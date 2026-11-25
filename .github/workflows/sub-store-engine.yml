@@ -1,0 +1,53 @@
+name: Sub-Store engine
+
+on:
+  workflow_call:
+    inputs:
+      reuse_artifact:
+        description: Reuse a verified engine from this workflow run
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+      - uses: actions/setup-go@v5
+        if: inputs.reuse_artifact == ''
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Validate workflow contracts
+        if: inputs.reuse_artifact == ''
+        run: ./scripts/ci.sh check-workflows
+      - name: Build pinned complete engine
+        if: inputs.reuse_artifact == ''
+        run: ./scripts/ci.sh prepare-service-engine
+      - uses: actions/download-artifact@v4
+        if: inputs.reuse_artifact != ''
+        with:
+          name: ${{ inputs.reuse_artifact }}
+          path: .cache/cloud-tools-20261121/runtime
+      - name: Verify shared engine without desktop resources
+        run: node scripts/sub-store/prepare-runtime.cjs --shared-only
+      - uses: actions/upload-artifact@v4
+        if: inputs.reuse_artifact == ''
+        with:
+          name: sub-store-engine
+          retention-days: 3
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            .cache/cloud-tools-20261121/runtime/sub-store.strict.bundle.cjs
+            .cache/cloud-tools-20261121/runtime/runtime-manifest-strict.json
+            .cache/cloud-tools-20261121/runtime/build-provenance.json

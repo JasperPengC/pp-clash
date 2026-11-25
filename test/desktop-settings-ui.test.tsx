@@ -5,14 +5,17 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RulesPage } from '../src/pages/Rules';
 import { SettingsPage } from '../src/pages/Settings';
 import { DEFAULT_SETTINGS, useApp } from '../src/store/app';
+import { useViewPreferences } from '../src/store/view-preferences';
 import { api } from '../src/core/api';
 
 vi.mock('../src/core/api', async (original) => {
   const actual = await original<typeof import('../src/core/api')>();
   return { ...actual, isTauri: true, api: {
     ...actual.api, mihomo: vi.fn(), listBackups: vi.fn(), backupAppState: vi.fn(), restoreBackup: vi.fn(),
+    getWebDavSettings: vi.fn().mockResolvedValue({ settings: { endpoint: '', directory: 'backups', username: '', deviceName: 'Mac', schedule: 'off', retention: 7 }, configured: false, hasPassword: false, hasBackupPassphrase: false, credentialStore: { status: 'available', backend: 'macosKeychain' } }),
   } };
 });
+vi.mock('../src/core/webdav-service', () => ({ webdavService: { status: vi.fn().mockResolvedValue({ phase: 'disabled', lastSuccessAt: null, nextDueAt: null, error: null }) } }));
 
 let root: Root; let host: HTMLDivElement;
 const notify = vi.fn(); const applyConfig = vi.fn(); const restartKernel = vi.fn();
@@ -33,6 +36,7 @@ async function enter(element: HTMLInputElement | HTMLTextAreaElement, value: str
   });
 }
 beforeEach(() => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   vi.useFakeTimers(); vi.clearAllMocks();
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
@@ -135,6 +139,25 @@ it('重新连接读取新规则，过期请求不能恢复断开前的数据', a
   await act(async () => old.resolve({ rules: [{ type: 'DOMAIN', payload: 'stale.example', proxy: 'DIRECT' }] }));
   expect(api.mihomo).toHaveBeenCalledTimes(2);
   expect(host.textContent).not.toContain('stale.example');
+});
+
+it.each(['mtime_ms', 'mtimeMs'])('备份列表读取%s字段显示真实本地时间', async (timeField) => {
+  const nativeBackup = [{ name: 'state-before-Mwb8Yk.json', size: 2048,
+    [timeField]: new Date(2026, 10, 23, 0, 42).getTime() }];
+  vi.mocked(api.listBackups).mockResolvedValue(nativeBackup as unknown as Awaited<ReturnType<typeof api.listBackups>>);
+  await act(async () => root.render(createElement(SettingsPage)));
+  await click(button('备份与恢复'));
+  expect(host.textContent).toContain('恢复前 · 11-23 00:42');
+  expect(host.textContent).not.toContain('NaN');
+});
+
+it.each([undefined, NaN, Infinity, 8_640_000_000_000_001])('备份时间无效（%s）时显示时间未知', async (mtime_ms) => {
+  const nativeBackup = [{ name: 'state-before-Mwb8Yk.json', size: 2048, mtime_ms }];
+  vi.mocked(api.listBackups).mockResolvedValue(nativeBackup as unknown as Awaited<ReturnType<typeof api.listBackups>>);
+  await act(async () => root.render(createElement(SettingsPage)));
+  await click(button('备份与恢复'));
+  expect(host.textContent).toContain('恢复前 · 时间未知');
+  expect(host.textContent).not.toContain('NaN');
 });
 
 it('备份列表读取失败可重试，加载期间不显示暂无备份', async () => {

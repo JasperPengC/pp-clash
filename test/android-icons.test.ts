@@ -37,13 +37,21 @@ dependencies {
   save('app/src/main/AndroidManifest.xml', '<manifest>\n    <uses-permission android:name="android.permission.INTERNET" />\n    <application android:icon="@mipmap/ic_launcher">\n            <activity\n            android:name=".MainActivity"\n            android:exported="true" />\n        <provider />\n    </application>\n</manifest>');
   mkdirSync(join(project, 'app/src/main/java/com/ppclash/app'), { recursive: true });
   save('stub.aar', 'fixture');
-  const configure = () => execFileSync(process.execPath, ['scripts/configure-android.mjs', project, join(project, 'stub.aar')], { stdio: 'pipe' });
+  for (const file of ['sub-store.bundle.cjs', 'service-bootstrap.cjs', 'build-provenance.json', 'runtime-manifest.json']) save(`runtime/${file}`, `fixture ${file}`);
+  for (const target of ['android-arm64', 'android-x64']) {
+    for (const file of ['node', 'manifest.json', 'LICENSE']) save(`runtime/${target}/${file}`, `fixture ${target}/${file}`);
+  }
+  const configure = () => execFileSync(process.execPath, ['scripts/configure-android.mjs', project, join(project, 'stub.aar'), join(project, 'runtime')], { stdio: 'pipe' });
   configure();
   const gradle = readFileSync(join(project, 'app/build.gradle.kts'), 'utf8');
   expect(gradle).toContain('isJniDebuggable = false');
   expect(gradle).toContain('jniLibs.keepDebugSymbols.clear()');
   expect(gradle).toContain('jniLibs.useLegacyPackaging = true');
-  expect(gradle).not.toContain('jniLibs.keepDebugSymbols.add(');
+  expect(gradle).not.toContain('jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")');
+  expect(gradle).toContain('jniLibs.keepDebugSymbols.add("**/libppclash_node.so")');
+  expect(readFileSync(join(project, 'app/src/main/jniLibs/arm64-v8a/libppclash_node.so'), 'utf8')).toBe('fixture android-arm64/node');
+  expect(readFileSync(join(project, 'app/src/main/jniLibs/x86_64/libppclash_node.so'), 'utf8')).toBe('fixture android-x64/node');
+  expect(readFileSync(join(project, 'app/src/main/assets/ppclash-cloud/service-bootstrap.cjs'), 'utf8')).toBe('fixture service-bootstrap.cjs');
   const manifest = readFileSync(join(project, 'app/src/main/AndroidManifest.xml'), 'utf8');
   expect(manifest).toContain('android:windowSoftInputMode="adjustNothing"');
   const activity = readFileSync(join(project, 'app/src/main/java/com/ppclash/app/MainActivity.kt'), 'utf8');

@@ -1,16 +1,26 @@
-.modal-card:has(.webdav-backup) { width: min(440px, calc(100vw - 32px)); max-height: min(80dvh, 640px); overflow-y: auto; }
-.webdav-backup, .webdav-backup form, .webdav-backup label, .webdav-summary { display: grid; gap: 10px; min-width: 0; }
-.webdav-backup { gap: 14px; }
-.webdav-backup header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.webdav-backup h3 { font-size: var(--type-section); }
-.webdav-backup h3, .webdav-backup p, .webdav-backup ul { margin: 0; }
-.webdav-backup label, .webdav-backup p, .webdav-summary span { font-size: .875rem; }
-.webdav-backup label { gap: 4px; }
-.webdav-backup input { width: 100%; min-width: 0; }
-.webdav-backup p, .webdav-summary span { color: var(--text-secondary); }
-.webdav-backup [role="alert"] { color: var(--danger); }
-.webdav-summary { gap: 4px; overflow-wrap: anywhere; }
-.webdav-actions, .webdav-row, .webdav-backup li { display: flex; align-items: center; gap: 8px; }
-.webdav-actions { justify-content: flex-end; }
-.webdav-row, .webdav-backup li { justify-content: space-between; }
-.webdav-backup ul { display: grid; gap: 6px; padding: 0; list-style: none; }
+.webdav-backup { padding:0 0 12px; border-bottom:1px solid var(--border-soft); }
+.dav-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:0 0 12px; }
+.dav-heading h3 { margin:0; font-size:var(--type-section); font-weight:var(--weight-semibold); }
+.dav-heading p,.dav-status,.dav-save { font-size:var(--type-meta); color:var(--text-secondary); line-height:1.6; }
+.dav-heading p { margin-top:4px; }.dav-save { white-space:nowrap; }.dav-fields { padding-bottom:8px; }
+.dav-row .input { width:100%; min-width:0; font-size:var(--type-control); }
+.dav-row .dav-number { max-width:100px; }
+.dav-policy { border-top:1px solid var(--border-soft); }
+.dav-secret { display:flex; align-items:center; gap:8px; width:100%; min-width:0; }.dav-secret .input { flex:1; }.dav-secret .btn { flex:none; }
+.dav-actions { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:8px 0; border-top:1px solid var(--border); }
+.dav-actions strong { font-size:var(--type-body); font-weight:500; }.dav-actions strong>span { margin-left:8px; font-size:var(--type-meta); color:var(--text-secondary); font-weight:400; }.dav-actions .btn { min-height:32px; }
+.dav-inline { display:flex; justify-content:flex-end; align-items:center; gap:8px; }
+.dav-error { color:var(--danger); font-size:var(--type-label); line-height:1.6; margin:6px 0; overflow-wrap:anywhere; }.dav-status { margin:4px 0; }
+.webdav-history { min-width:0; }.history-tools { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:8px 0; }
+.history-scroll { max-height:360px; overflow:auto; }.history-table-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:9px 0; border-bottom:1px solid var(--border); min-height:56px; }
+.history-table-row>div:first-child { min-width:0; display:flex; flex-direction:column; gap:4px; }.history-table-row strong { font-size:var(--type-body); font-weight:500; overflow-wrap:anywhere; }.history-table-row strong small { font-size:var(--type-meta); color:var(--text-secondary); margin-left:8px; }.history-table-row span { font-size:var(--type-meta); color:var(--text-secondary); }
+.dav-filename { overflow-wrap:anywhere; font-size:var(--type-meta); color:var(--text-secondary); margin:10px 0; }.dav-restore-summary { display:flex; flex-direction:column; gap:8px; margin:12px 0; font-size:var(--type-body); }.dav-unlock { display:flex; flex-direction:column; gap:8px; font-size:var(--type-label); }
+@media(max-width:850px) { .dav-actions { flex-wrap:wrap; } }
+@media(max-width:600px) { .dav-secret { justify-content:flex-start; } }
+.android-window .android-webdav-dialog { display:flex; flex-direction:column; max-height:calc(100dvh - var(--android-ime-height,0px) - 48px); }
+.android-webdav-content { overflow:auto; min-height:0; overscroll-behavior:contain; }
+.android-window .dav-heading { flex-wrap:wrap; gap:8px; }
+.android-window .dav-row { flex-wrap:wrap; }
+.android-window .dav-row .field-control { width:100%; }
+.android-window .dav-actions { align-items:flex-start; }
+.android-window .history-table-row { flex-wrap:wrap; gap:8px; }

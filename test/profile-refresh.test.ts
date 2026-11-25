@@ -3,6 +3,9 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { api } from '../src/core/api';
 import { generateConfig } from '../src/core/generator';
 import { useApp, type Profile } from '../src/store/app';
+import { requestSubStore } from '../src/core/sub-store/service';
+
+vi.mock('../src/core/sub-store/service', () => ({ requestSubStore: vi.fn() }));
 
 vi.mock('../src/core/api', async original => {
   const actual = await original<typeof import('../src/core/api')>();
@@ -25,6 +28,28 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 const current = (id = 'active') => useApp.getState().profiles.find(p => p.id === id);
+
+it('Sub-Store 来源更新使用同一引擎重生成并保存关联', async () => {
+  useApp.setState(s => ({ profiles: s.profiles.map(p => p.id === 'inactive'
+    ? { ...p, sourceType: 'substore', subStore: { kind: 'collection', name: 'daily / 特殊' }, url: '' } : p) }));
+  vi.mocked(requestSubStore).mockResolvedValue(newRaw);
+  expect(await useApp.getState().refreshProfile('inactive')).toBe(true);
+  expect(requestSubStore).toHaveBeenCalledWith('/download/collection/daily%20%2F%20%E7%89%B9%E6%AE%8A?target=ClashMeta&noCache=true');
+  expect(current('inactive')).toMatchObject({ raw: newRaw, subStore: { kind: 'collection', name: 'daily / 特殊' } });
+  expect(api.fetchSubscription).not.toHaveBeenCalled();
+});
+
+it('Sub-Store 处理失败保留应用最后成功配置与更新时间', async () => {
+  useApp.setState(s => ({ profiles: s.profiles.map(p => p.id === 'active'
+    ? { ...p, sourceType: 'substore', subStore: { kind: 'sub', name: 'source' }, url: '' } : p), kernelPhase: 'running', connectedAt: 55 }));
+  const before = current();
+  vi.mocked(requestSubStore).mockRejectedValue(new Error('fixture processor failure'));
+  expect(await useApp.getState().refreshProfile('active')).toBe(false);
+  expect(current()).toEqual(before);
+  expect(api.commitConfig).not.toHaveBeenCalled();
+  expect(api.startKernel).not.toHaveBeenCalled();
+  expect(useApp.getState().profileRefreshErrors.active).toContain('fixture processor failure');
+});
 let disk: string;
 let loaded: string;
 let sequence: number;
@@ -124,6 +149,30 @@ it('有效非活动订阅也生成并校验候选，但不替换活动配置或�
   expect(api.stopKernel).not.toHaveBeenCalled();
 });
 
+it.each(['active', 'inactive'])('后台更新 %s 的下载与校验不锁定全局操作，确认前继续使用旧配置', async id => {
+  const download = deferred<ReturnType<typeof payload>>();
+  const validation = deferred<void>();
+  const originalDisk = disk;
+  const groups = [{ name: 'Main', type: 'Selector', now: 'old-node', nodes: [{ name: 'old-node', type: 'Socks5', delay: 20 }] }];
+  useApp.setState({ kernelPhase: 'running', connectedAt: 55, groups });
+  vi.mocked(api.fetchSubscription).mockImplementationOnce(() => download.promise);
+  vi.mocked(api.validateConfig).mockImplementationOnce(() => validation.promise);
+  const updating = useApp.getState().refreshProfile(id);
+  expect(useApp.getState()).toMatchObject({ busy: false, runtimeConfigTransition: false, kernelPhase: 'running', connectedAt: 55 });
+  download.resolve(payload());
+  await vi.waitFor(() => expect(api.validateConfig).toHaveBeenCalledOnce());
+  const duringValidation = useApp.getState();
+  validation.resolve();
+  // 先等待结束再断言，失败测试也不留下在途事务影响其他用例。
+  const beforeCommit = { disk, loaded, raw: current(id)!.raw };
+  expect(await updating).toBe(true);
+  expect(duringValidation).toMatchObject({ busy: false, runtimeConfigTransition: false, kernelPhase: 'running', connectedAt: 55, groups });
+  expect(duringValidation.refreshingIds).toEqual([id]);
+  expect(beforeCommit).toEqual({ disk: originalDisk, loaded: originalDisk, raw: oldRaw });
+  expect(api.stopKernel).not.toHaveBeenCalled();
+  expect(api.startKernel).not.toHaveBeenCalled();
+});
+
 it('不同订阅可同时更新，同一订阅去重，失败与成功各自清理更新状态', async () => {
   const first = deferred<ReturnType<typeof payload>>();
   const second = deferred<ReturnType<typeof payload>>();
@@ -170,6 +219,49 @@ it('活动候选加载被拒绝时回退磁盘，旧订阅与已连接内核继�
   expect(useApp.getState().notify).not.toHaveBeenCalledWith('success', expect.anything());
 });
 
+it('回退成功后立即发布旧配置的实际节点快照，不依赖概览轮询恢复节点页', async () => {
+  useApp.setState({ kernelPhase: 'running', connectedAt: 55, runtimeConfigRevision: 7,
+    proxyRuntime: { profileId: 'active', revision: 7, connectedAt: 55, proxies: {} } });
+  vi.mocked(api.mihomo).mockRejectedValueOnce(new Error('fixture load rejected'));
+  expect(await useApp.getState().refreshProfile('active')).toBe(false);
+  const state = useApp.getState();
+  expect(state.runtimeConfigRevision).toBeGreaterThan(7);
+  expect(state.proxyRuntime).toMatchObject({ profileId: 'active', revision: state.runtimeConfigRevision,
+    connectedAt: 55, proxies: { Main: { type: 'Selector', now: 'old-node' } } });
+  expect(state.groups.find(group => group.name === 'Main')?.now).toBe('old-node');
+  expect(state.runtimeConfigTransition).toBe(false);
+  expect(state.kernelError).toBeNull();
+});
+
+it('回退恢复加载旧文件后被重置的固定节点，保留用户最近确认的选择', async () => {
+  const raw = JSON.stringify({ proxies: [...JSON.parse(oldRaw).proxies, ...JSON.parse(newRaw).proxies],
+    'proxy-groups': [{ name: 'Main', type: 'select', proxies: ['old-node', 'new-node'] }], rules: ['MATCH,Main'] });
+  useApp.setState({ kernelPhase: 'running', connectedAt: 55, profiles: [{ ...profile(), raw }],
+    fixedNodes: { active: { Main: 'new-node' } }, selectedNodes: { active: { Main: 'new-node' } } });
+  // 用户已通过控制器固定到 new-node，但磁盘仍是先前默认 old-node 的配置。
+  disk = (await generateConfig(raw, useApp.getState().policy)).config;
+  loaded = disk;
+  let selected = 'new-node';
+  let rejectConfirmation = true;
+  vi.mocked(api.fetchSubscription).mockResolvedValueOnce(payload(raw));
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    if (path.startsWith('/configs')) {
+      loaded = disk;
+      selected = JSON.parse(loaded)['proxy-groups'].find((group: any) => group.name === 'Main')['default-selected'] ?? 'old-node';
+      return null;
+    }
+    if (method === 'PUT' && path === '/proxies/Main') { selected = (body as { name: string }).name; return null; }
+    if (rejectConfirmation) { rejectConfirmation = false; throw Error('fixture confirmation lost'); }
+    return { proxies: { Main: { type: 'Selector', now: selected, all: ['old-node', 'new-node'] },
+      'old-node': { type: 'Socks5' }, 'new-node': { type: 'Socks5' } } };
+  });
+  expect(await useApp.getState().refreshProfile('active')).toBe(false);
+  expect(selected).toBe('new-node');
+  expect(useApp.getState().groups.find(group => group.name === 'Main')?.now).toBe('new-node');
+  expect(useApp.getState().fixedNodes.active.Main).toBe('new-node');
+  expect(useApp.getState().kernelError).toBeNull();
+});
+
 it('活动候选在校验、正式提交和内核确认前保持原文，确认后一起发布', async () => {
   useApp.setState({ kernelPhase: 'running', connectedAt: 55 });
   const before = current(); const validation = deferred<void>(); const commit = deferred<void>(); const load = deferred<void>();
@@ -200,6 +292,109 @@ it('同订阅并发刷新只下载和提交一次，调用方共享结果', asyn
   expect(await Promise.all([first, second])).toEqual([true, true]);
   expect(api.fetchSubscription).toHaveBeenCalledOnce(); expect(api.commitConfig).toHaveBeenCalledOnce();
   expect(useApp.getState().refreshingIds).toEqual([]);
+});
+
+it.each(['download', 'validate'])('更新在 %s 期间切换节点，采用最新选择继续更新，不切回旧节点', async stage => {
+  const download = deferred<ReturnType<typeof payload>>();
+  const validation = deferred<void>();
+  const revalidation = deferred<void>();
+  const raw = JSON.stringify({ ...JSON.parse(newRaw), proxies: [...JSON.parse(oldRaw).proxies, ...JSON.parse(newRaw).proxies],
+    'proxy-groups': [{ name: 'Main', type: 'select', proxies: ['old-node', 'new-node'] }] });
+  useApp.setState({ kernelPhase: 'running', connectedAt: 55, selectedNodes: { active: { Main: 'old-node' } } });
+  vi.mocked(api.fetchSubscription).mockImplementationOnce(() => download.promise);
+  if (stage === 'validate') vi.mocked(api.validateConfig).mockImplementationOnce(() => validation.promise)
+    .mockImplementationOnce(() => revalidation.promise);
+  vi.mocked(api.mihomo).mockImplementation(async (_method, path) => {
+    if (path.startsWith('/configs')) { loaded = disk; return null; }
+    const currentName = JSON.parse(loaded)['proxy-groups'].find((group: any) => group.name === 'Main')['default-selected'];
+    return { proxies: { Main: { type: 'Selector', now: currentName, all: ['old-node', 'new-node'] },
+      'old-node': { type: 'Socks5' }, 'new-node': { type: 'Socks5' } } };
+  });
+  const pending = useApp.getState().refreshProfile('active');
+  if (stage === 'validate') {
+    download.resolve(payload(raw));
+    await vi.waitFor(() => expect(api.validateConfig).toHaveBeenCalledOnce());
+  }
+  // 模拟控制器已确认的新选择；刷新事务必须在应用边界重新读取它。
+  useApp.setState({ selectedNodes: { active: { Main: 'new-node' } } });
+  download.resolve(payload(raw)); validation.resolve();
+  let busyWhileRevalidating = false;
+  if (stage === 'validate') {
+    await vi.waitFor(() => expect(api.validateConfig).toHaveBeenCalledTimes(2));
+    busyWhileRevalidating = useApp.getState().busy;
+    revalidation.resolve();
+  }
+  expect(await pending).toBe(true);
+  expect(busyWhileRevalidating).toBe(false);
+  expect(current()!.raw).toBe(raw);
+  expect(useApp.getState().groups.find(group => group.name === 'Main')?.now).toBe('new-node');
+  expect(useApp.getState().selectedNodes.active.Main).toBe('new-node');
+  expect(api.validateConfig).toHaveBeenCalledTimes(stage === 'validate' ? 2 : 1);
+  expect(api.commitConfig).toHaveBeenCalledOnce();
+  expect(api.stopKernel).not.toHaveBeenCalled();
+});
+
+it.each(['success', 'reject', 'unconfirmed'])('热更新后恢复动态来源中仍存在的手选节点，恢复失败则回退（结果=%s）', async outcome => {
+  const fail = outcome !== 'success';
+  useApp.setState({ kernelPhase: 'running', connectedAt: 55, selectedNodes: { active: { Main: 'provider-node' } } });
+  const originalDisk = disk;
+  const raw = JSON.stringify({ 'proxy-providers': { remote: { type: 'http', url: 'https://fixture.invalid/nodes', path: './nodes.yaml' } },
+    'proxy-groups': [{ name: 'Main', type: 'select', use: ['remote'] }], rules: ['MATCH,Main'] });
+  vi.mocked(api.fetchSubscription).mockResolvedValueOnce(payload(raw));
+  let observedNode = 'other-node';
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    if (path.startsWith('/configs')) { loaded = disk; observedNode = 'other-node'; return null; }
+    if (method === 'PUT' && path === '/proxies/Main') {
+      if (outcome === 'reject') throw Error('selection rejected');
+      if (outcome === 'success') observedNode = (body as { name: string }).name;
+      return null;
+    }
+    return { proxies: { Main: { type: 'Selector', now: observedNode, all: ['other-node', 'provider-node'] },
+      'other-node': { type: 'Socks5' }, 'provider-node': { type: 'Socks5' } } };
+  });
+  expect(await useApp.getState().refreshProfile('active')).toBe(!fail);
+  if (fail) {
+    expect(current()!.raw).toBe(oldRaw);
+    expect(loaded).toBe(originalDisk);
+    expect(useApp.getState().profileRefreshErrors.active).toContain(outcome === 'reject' ? 'selection rejected' : '未确认原节点');
+  } else {
+    expect(useApp.getState().groups.find(group => group.name === 'Main')?.now).toBe('provider-node');
+    expect(current()!.raw).toBe(raw);
+  }
+  expect(useApp.getState().selectedNodes.active.Main).toBe('provider-node');
+  expect(api.stopKernel).not.toHaveBeenCalled();
+});
+
+it.each(['constructor', 'toString', '__proto__'])('动态分组 %s 与对象原型同名时仍恢复手选节点', async group => {
+  const raw = JSON.stringify({ 'proxy-providers': { remote: { type: 'http', url: 'https://fixture.invalid/nodes', path: './nodes.yaml' } },
+    'proxy-groups': [{ name: group, type: 'select', use: ['remote'] }], rules: [`MATCH,${group}`] });
+  useApp.setState({ kernelPhase: 'running', connectedAt: 55, selectedNodes: { active: { [group]: 'provider-node' } } });
+  vi.mocked(api.fetchSubscription).mockResolvedValueOnce(payload(raw));
+  let selected = 'other-node';
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    if (path.startsWith('/configs')) { loaded = disk; return null; }
+    if (method === 'PUT' && path === `/proxies/${group}`) { selected = (body as { name: string }).name; return null; }
+    return { proxies: { [group]: { type: 'Selector', now: selected, all: ['other-node', 'provider-node'] },
+      'other-node': { type: 'Socks5' }, 'provider-node': { type: 'Socks5' } } };
+  });
+  expect(await useApp.getState().refreshProfile('active')).toBe(true);
+  expect(selected).toBe('provider-node');
+  expect(useApp.getState().groups.find(item => item.name === group)?.now).toBe('provider-node');
+});
+
+it('持续切节点最多重新校验三次，保留旧订阅并明确提示，清理所有候选与更新状态', async () => {
+  const originalDisk = disk;
+  vi.mocked(api.validateConfig).mockImplementation(async () => {
+    const selected = useApp.getState().selectedNodes.active?.Main;
+    useApp.setState({ selectedNodes: { active: { Main: selected === 'new-node' ? 'old-node' : 'new-node' } } });
+  });
+  expect(await useApp.getState().refreshProfile('active')).toBe(false);
+  expect(api.validateConfig).toHaveBeenCalledTimes(3);
+  expect(api.discardConfig).toHaveBeenCalledTimes(3);
+  expect(api.commitConfig).not.toHaveBeenCalled();
+  expect(current()!.raw).toBe(oldRaw); expect(disk).toBe(originalDisk);
+  expect(useApp.getState()).toMatchObject({ busy: false, refreshingIds: [] });
+  expect(useApp.getState().profileRefreshErrors.active).toContain('节点选择持续变化');
 });
 
 const edits: Array<[string, () => void]> = [

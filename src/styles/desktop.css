@@ -458,6 +458,20 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
+/* 多选保留原生键盘语义，外观与应用的输入、开关共享令牌。 */
+.checkbox { position:relative; display:inline-flex; align-items:center; gap:8px; min-height:30px; font-size:var(--type-control); color:var(--text-primary); cursor:pointer; }
+.checkbox-input { position:absolute; inset:0; width:100%; height:100%; margin:0; opacity:0; cursor:inherit; }
+.checkbox-mark { display:grid; place-items:center; flex:none; width:16px; height:16px; border:1px solid var(--border-strong); border-radius:5px; background:var(--surface); color:var(--accent-contrast); }
+.checkbox-mark > svg { visibility:hidden; }
+.checkbox-input:is(:checked,:indeterminate) + .checkbox-mark { background:var(--accent); border-color:var(--accent); }
+.checkbox-input:checked + .checkbox-mark > svg { visibility:visible; }
+.checkbox-mark > span { width:8px; height:2px; border-radius:1px; background:currentColor; }
+.checkbox-input:focus-visible + .checkbox-mark { outline:2px solid var(--accent); outline-offset:3px; }
+.checkbox:hover:has(.checkbox-input:not(:disabled)) .checkbox-mark { border-color:var(--accent); }
+.checkbox:has(.checkbox-input:disabled) { cursor:default; color:var(--text-muted); }
+.checkbox-input:disabled + .checkbox-mark { opacity:.5; }
+.checkbox-label { min-width:0; overflow-wrap:anywhere; }
+
 /* 数据表：名称左对齐，数值等宽；只有细分隔与悬停底色。 */
 .conn-toolbar,
 .log-toolbar {

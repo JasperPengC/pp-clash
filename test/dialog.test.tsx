@@ -53,6 +53,46 @@ it('Escape 仅在非忙碌时取消，忙碌时焦点仍被保留', async () => 
   await render(true, false); key('Escape'); expect(dismiss).toHaveBeenCalledTimes(2);
 });
 
+it('嵌套弹窗只由顶层处理焦点与Escape，忙碌时保留两层', async () => {
+  const innerDismiss = vi.fn();
+  const show = (busy: boolean, inner = true) => act(async () => root.render(<Dialog labelledBy="outer-title" onDismiss={dismiss}>
+    <button id="outer-title">外层</button>
+    {inner && <Dialog labelledBy="inner-title" busy={busy} onDismiss={innerDismiss}><button id="inner-title" disabled={busy}>内层</button></Dialog>}
+  </Dialog>));
+  await show(false, false);
+  await show(true);
+  expect(document.activeElement?.getAttribute('aria-labelledby')).toBe('inner-title');
+  key('Escape');
+  expect(dismiss).not.toHaveBeenCalled();
+  expect(innerDismiss).not.toHaveBeenCalled();
+  await show(false);
+  document.getElementById('inner-title')!.focus();
+  key('Escape');
+  expect(innerDismiss).toHaveBeenCalledTimes(1);
+  expect(dismiss).not.toHaveBeenCalled();
+  await show(false, false);
+  expect(document.activeElement?.id).toBe('outer-title');
+  key('Escape');
+  expect(dismiss).toHaveBeenCalledTimes(1);
+});
+
+it('同时挂载两层时顶层门户最后绘制，键盘与点击层级一致', async () => {
+  const show = (inner = true) => act(async () => root.render(<Dialog labelledBy="outer" onDismiss={dismiss}>
+    <button id="outer">外层</button>
+    {inner && <Dialog labelledBy="inner" onDismiss={dismiss}><button id="inner">内层</button></Dialog>}
+  </Dialog>));
+  await show();
+  const top = document.getElementById('inner')!.closest('[role="dialog"]')!;
+  expect(document.body.lastElementChild?.contains(top)).toBe(true);
+  expect(document.body.lastElementChild?.hasAttribute('inert')).toBe(false);
+  expect(document.getElementById('outer')!.closest('[inert]')).not.toBeNull();
+  expect(document.activeElement?.id).toBe('inner');
+  await show(false);
+  await show();
+  await render(false);
+  expect(document.activeElement).toBe(opener);
+});
+
 it('Dialog 声明模态与描述，Escape 关闭后恢复原触发器', async () => {
   await act(async () => root.render(createElement(Dialog, {
     labelledBy: 'label', describedBy: 'description', onDismiss: () => void render(false),

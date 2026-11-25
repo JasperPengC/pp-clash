@@ -5,6 +5,7 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { ProxiesPage } from '../src/pages/Proxies';
 import { OverviewPage } from '../src/pages/Overview';
 import { useApp } from '../src/store/app';
+import { useViewPreferences } from '../src/store/view-preferences';
 import { api } from '../src/core/api';
 import { DEFAULT_LATENCY_URL, GITHUB_LATENCY_URL } from '../src/core/latency';
 
@@ -26,6 +27,7 @@ const respondToLatency = async (_method: string, path: string) => String(path).i
   ? { delay: String(path).includes(encodeURIComponent(GITHUB_LATENCY_URL)) ? 82 : 21 }
   : reportedGithub(82);
 beforeEach(() => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   vi.clearAllMocks(); localStorage.clear();
   vi.mocked(api.mihomo).mockReset();
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;

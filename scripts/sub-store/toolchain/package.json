@@ -1,0 +1,8 @@
+{
+  "name": "ppclash-sub-store-toolchain",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "corepack": "0.34.6"
+  }
+}

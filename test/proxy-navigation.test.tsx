@@ -7,6 +7,7 @@ import { ProxiesPage, orderedGroupNodes } from '../src/pages/Proxies';
 import { useApp } from '../src/store/app';
 import { api } from '../src/core/api';
 import { DEFAULT_LATENCY_URL } from '../src/core/latency';
+import { useViewPreferences } from '../src/store/view-preferences';
 
 vi.mock('../src/core/api', async original => {
   const actual = await original<typeof import('../src/core/api')>();
@@ -28,8 +29,62 @@ const seed = (count: number) => useApp.setState({ groups: [{ name: '线路', typ
   nodes: Array.from({ length: count }, (_, i) => ({ name: `线路 ${i}`, type: 'Shadowsocks', delay: null,
     delaysByTarget: { [DEFAULT_LATENCY_URL]: count - i } })) }] });
 
+const seedBrowsingGroups = () => useApp.setState({ groups: ['默认组', '工作组', '影音组'].map(name => ({
+  name, type: 'Selector', now: '东京', nodes: [
+    { name: '东京', type: 'Shadowsocks', delay: 30, delaysByTarget: { [DEFAULT_LATENCY_URL]: 30 } },
+    { name: '大阪', type: 'Shadowsocks', delay: 15, delaysByTarget: { [DEFAULT_LATENCY_URL]: 15 } },
+  ],
+})) });
+
+it('离开节点页再返回恢复浏览分组、排序与可用筛选，不切换运行节点', async () => {
+  seedBrowsingGroups();
+  const select = vi.fn(); useApp.setState({ selectNode: select });
+  await render(); await click('查看分组 工作组');
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="排序方式"] button')].find(b => b.textContent === '延迟')!.click());
+  await click('仅显示可用节点');
+  await act(async () => root.render(null)); await render();
+  expect(button('查看分组 工作组').getAttribute('aria-current')).toBe('true');
+  expect(host.querySelector('[aria-label="排序方式"] [aria-pressed="true"]')?.textContent).toBe('延迟');
+  expect(button('仅显示可用节点').getAttribute('aria-checked')).toBe('true');
+  expect(rows()[0].textContent).toContain('大阪');
+  expect(select).not.toHaveBeenCalled();
+});
+
+it('应用配置或订阅更新后仍浏览原来的有效分组', async () => {
+  seedBrowsingGroups(); await render(); await click('查看分组 工作组');
+  await act(async () => useApp.setState(state => ({ runtimeConfigRevision: state.runtimeConfigRevision + 1,
+    profiles: state.profiles.map(profile => ({ ...profile, raw: '# updated subscription' })) })));
+  expect(button('查看分组 工作组').getAttribute('aria-current')).toBe('true');
+});
+
+it('切换订阅分别记住浏览分组，已移除的分组安全回退', async () => {
+  seedBrowsingGroups(); await render(); await click('查看分组 工作组');
+  await act(async () => useApp.setState({ activeId: 'second' }));
+  expect(button('查看分组 默认组').getAttribute('aria-current')).toBe('true');
+  await click('查看分组 影音组');
+  await act(async () => useApp.setState({ activeId: 'fixture' }));
+  expect(button('查看分组 工作组').getAttribute('aria-current')).toBe('true');
+  await act(async () => useApp.setState({ activeId: 'second' }));
+  expect(button('查看分组 影音组').getAttribute('aria-current')).toBe('true');
+  await act(async () => useApp.setState(state => ({ groups: state.groups.filter(group => group.name !== '影音组') })));
+  expect(button('查看分组 默认组').getAttribute('aria-current')).toBe('true');
+  expect(rows()).toHaveLength(2);
+});
+
+it('节点搜索随订阅保留，离页返回不必重复输入', async () => {
+  seedBrowsingGroups(); await render(); await click('查看分组 工作组'); await setQuery('大阪');
+  await act(async () => root.render(null)); await render();
+  expect(host.querySelector<HTMLInputElement>('[aria-label="搜索节点"]')?.value).toBe('大阪');
+  expect(rows()).toHaveLength(1); expect(rows()[0].textContent).toContain('大阪');
+  await act(async () => useApp.setState({ activeId: 'second' }));
+  expect(host.querySelector<HTMLInputElement>('[aria-label="搜索节点"]')?.value).toBe('');
+  await act(async () => useApp.setState({ activeId: 'fixture' }));
+  expect(host.querySelector<HTMLInputElement>('[aria-label="搜索节点"]')?.value).toBe('大阪');
+});
+
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear();
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   localStorage.setItem('ppclash.proxy.groups.open', JSON.stringify({ 线路: true }));
   useApp.setState({ ...initial, activeId: 'fixture', connectedAt: 1, kernelPhase: 'running', notify: vi.fn(),

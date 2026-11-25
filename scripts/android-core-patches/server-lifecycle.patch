@@ -1,0 +1,512 @@
+--- a/hub/route/server.go
++++ b/hub/route/server.go
+@@ -5,11 +5,13 @@
+ 	"context"
+ 	"crypto/subtle"
+ 	"encoding/json"
++	"errors"
+ 	"net"
+ 	"os"
+ 	"path/filepath"
+ 	"runtime/debug"
+ 	"strings"
++	"sync"
+ 	"syscall"
+ 	"time"
+ 
+@@ -37,6 +39,14 @@
+ 	tlsServer  *http.Server
+ 	unixServer *http.Server
+ 	pipeServer *http.Server
++
++	serverMux        sync.Mutex
++	mutationMux      sync.Mutex
++	serverGeneration *controllerGeneration
++	httpListener     net.Listener
++	tlsListener      net.Listener
++	unixListener     net.Listener
++	pipeListener     net.Listener
+ 
+ 	embedMode = false
+ )
+@@ -89,12 +99,40 @@
+ 	}).Handler)
+ }
+ 
++// Each router retains its generation even when parsing outlives its server.
++// mutationMux guards generation validity and the entire PATCH/PUT mutation.
++type controllerGeneration struct {
++	active bool
++}
++
++func (generation *controllerGeneration) beginMutation(w http.ResponseWriter, r *http.Request) bool {
++	mutationMux.Lock()
++	if generation == nil || !generation.active {
++		mutationMux.Unlock()
++		render.Status(r, http.StatusServiceUnavailable)
++		render.JSON(w, r, newError("controller generation is no longer active"))
++		return false
++	}
++	return true
++}
++
+ func ReCreateServer(cfg *Config) {
+-	go start(cfg)
+-	go startTLS(cfg)
+-	go startUnix(cfg)
++	serverMux.Lock()
++	defer serverMux.Unlock()
++	// Invalidate before closing sockets. Wait for entered parsing/mutations,
++	// not request decoding or raw configuration file reads.
++	mutationMux.Lock()
++	if serverGeneration != nil {
++		serverGeneration.active = false
++	}
++	generation := &controllerGeneration{active: true}
++	serverGeneration = generation
++	mutationMux.Unlock()
++	start(cfg, generation)
++	startTLS(cfg, generation)
++	startUnix(cfg, generation)
+ 	if inbound.SupportNamedPipe {
+-		go startPipe(cfg)
++		startPipe(cfg, generation)
+ 	}
+ }
+ 
+@@ -102,7 +140,7 @@
+ 	uiPath = C.Path.Resolve(path)
+ }
+ 
+-func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
++func router(isDebug bool, secret string, dohServer string, cors Cors, generation *controllerGeneration) *chi.Mux {
+ 	r := chi.NewRouter()
+ 	cors.Apply(r)
+ 	if isDebug {
+@@ -125,7 +163,7 @@
+ 		r.Get("/traffic", traffic)
+ 		r.Get("/memory", memory)
+ 		r.Get("/version", version)
+-		r.Mount("/configs", configRouter())
++		r.Mount("/configs", configRouter(generation))
+ 		r.Mount("/proxies", proxyRouter())
+ 		r.Mount("/group", groupRouter())
+ 		r.Mount("/rules", ruleRouter())
+@@ -159,11 +197,25 @@
+ 	return r
+ }
+ 
+-func start(cfg *Config) {
++// Only serving is asynchronous. The caller owns registration and socket closure.
++func serveController(server *http.Server, listener net.Listener, name string) {
++	go func() {
++		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
++			log.Errorln("External controller %s serve error: %s", name, err)
++		}
++	}()
++}
++
++func start(cfg *Config, generation *controllerGeneration) {
+ 	// first stop existing server
+ 	if httpServer != nil {
+ 		_ = httpServer.Close()
+ 		httpServer = nil
++	}
++	// Close the socket even when Serve has not been scheduled yet.
++	if httpListener != nil {
++		_ = httpListener.Close()
++		httpListener = nil
+ 	}
+ 
+ 	// handle addr
+@@ -178,20 +230,24 @@
+ 		log.Infoln("RESTful API listening at: %s", l.Addr().String())
+ 
+ 		server := &http.Server{
+-			Handler: router(cfg.IsDebug, cfg.Secret, cfg.DohServer, cfg.Cors),
++			Handler: router(cfg.IsDebug, cfg.Secret, cfg.DohServer, cfg.Cors, generation),
+ 		}
+ 		httpServer = server
+-		if err = server.Serve(l); err != nil {
+-			log.Errorln("External controller serve error: %s", err)
+-		}
+-	}
+-}
+-
+-func startTLS(cfg *Config) {
++		httpListener = l
++		serveController(server, httpListener, "http")
++	}
++}
++
++func startTLS(cfg *Config, generation *controllerGeneration) {
+ 	// first stop existing server
+ 	if tlsServer != nil {
+ 		_ = tlsServer.Close()
+ 		tlsServer = nil
++	}
++	// Close the socket even when Serve has not been scheduled yet.
++	if tlsListener != nil {
++		_ = tlsListener.Close()
++		tlsListener = nil
+ 	}
+ 
+ 	// handle tlsAddr
+@@ -239,20 +295,24 @@
+ 			}
+ 		}
+ 		server := &http.Server{
+-			Handler: router(cfg.IsDebug, cfg.Secret, cfg.DohServer, cfg.Cors),
++			Handler: router(cfg.IsDebug, cfg.Secret, cfg.DohServer, cfg.Cors, generation),
+ 		}
+ 		tlsServer = server
+-		if err = server.Serve(tls.NewListener(l, tlsConfig)); err != nil {
+-			log.Errorln("External controller tls serve error: %s", err)
+-		}
+-	}
+-}
+-
+-func startUnix(cfg *Config) {
++		tlsListener = tls.NewListener(l, tlsConfig)
++		serveController(server, tlsListener, "tls")
++	}
++}
++
++func startUnix(cfg *Config, generation *controllerGeneration) {
+ 	// first stop existing server
+ 	if unixServer != nil {
+ 		_ = unixServer.Close()
+ 		unixServer = nil
++	}
++	// Close the socket even when Serve has not been scheduled yet.
++	if unixListener != nil {
++		_ = unixListener.Close()
++		unixListener = nil
+ 	}
+ 
+ 	// handle addr
+@@ -287,21 +347,25 @@
+ 		log.Infoln("RESTful API unix listening at: %s", l.Addr().String())
+ 
+ 		server := &http.Server{
+-			Handler: router(cfg.IsDebug, "", cfg.DohServer, cfg.Cors),
++			Handler: router(cfg.IsDebug, "", cfg.DohServer, cfg.Cors, generation),
+ 		}
+ 		unixServer = server
+-		if err = server.Serve(l); err != nil {
+-			log.Errorln("External controller unix serve error: %s", err)
+-		}
+-	}
+-}
+-
+-func startPipe(cfg *Config) {
++		unixListener = l
++		serveController(server, unixListener, "unix")
++	}
++}
++
++func startPipe(cfg *Config, generation *controllerGeneration) {
+ 	// first stop existing server
+ 	if pipeServer != nil {
+ 		_ = pipeServer.Close()
+ 		pipeServer = nil
+ 	}
++	// Close the socket even when Serve has not been scheduled yet.
++	if pipeListener != nil {
++		_ = pipeListener.Close()
++		pipeListener = nil
++	}
+ 
+ 	// handle addr
+ 	if len(cfg.PipeAddr) > 0 {
+@@ -318,12 +382,11 @@
+ 		log.Infoln("RESTful API pipe listening at: %s", l.Addr().String())
+ 
+ 		server := &http.Server{
+-			Handler: router(cfg.IsDebug, "", cfg.DohServer, cfg.Cors),
++			Handler: router(cfg.IsDebug, "", cfg.DohServer, cfg.Cors, generation),
+ 		}
+ 		pipeServer = server
+-		if err = server.Serve(l); err != nil {
+-			log.Errorln("External controller pipe serve error: %s", err)
+-		}
++		pipeListener = l
++		serveController(server, pipeListener, "pipe")
+ 	}
+ }
+ 
+--- a/hub/route/configs.go
++++ b/hub/route/configs.go
+@@ -1,7 +1,9 @@
+ package route
+ 
+ import (
++	"fmt"
+ 	"net/netip"
++	"os"
+ 	"path/filepath"
+ 
+ 	"github.com/metacubex/mihomo/adapter/inbound"
+@@ -9,7 +11,6 @@
+ 	"github.com/metacubex/mihomo/component/process"
+ 	"github.com/metacubex/mihomo/component/resolver"
+ 	"github.com/metacubex/mihomo/component/updater"
+-	"github.com/metacubex/mihomo/config"
+ 	C "github.com/metacubex/mihomo/constant"
+ 	"github.com/metacubex/mihomo/hub/executor"
+ 	"github.com/metacubex/mihomo/listener"
+@@ -22,13 +23,15 @@
+ 	"github.com/metacubex/http"
+ )
+ 
+-func configRouter() http.Handler {
++func configRouter(generation *controllerGeneration) http.Handler {
+ 	r := chi.NewRouter()
+ 	r.Get("/", getConfigs)
+-	if !embedMode { // disallow update/patch configs in embed mode
+-		r.Put("/", updateConfigs)
++	// Embedded Android needs configuration reloads, but process controls and
++	// geo updates retain their existing embed-mode restrictions.
++	r.Put("/", generation.updateConfigs)
++	r.Patch("/", generation.patchConfigs)
++	if !embedMode {
+ 		r.Post("/geo", updateGeoDatabases)
+-		r.Patch("/", patchConfigs)
+ 	}
+ 	return r
+ }
+@@ -331,13 +334,18 @@
+ 	return def
+ }
+ 
+-func patchConfigs(w http.ResponseWriter, r *http.Request) {
++func (generation *controllerGeneration) patchConfigs(w http.ResponseWriter, r *http.Request) {
+ 	general := &configSchema{}
+ 	if err := render.DecodeJSON(r.Body, &general); err != nil {
+ 		render.Status(r, http.StatusBadRequest)
+ 		render.JSON(w, r, ErrBadRequest)
+ 		return
+ 	}
++
++	if !generation.beginMutation(w, r) {
++		return
++	}
++	defer mutationMux.Unlock()
+ 
+ 	if general.AllowLan != nil {
+ 		listener.SetAllowLan(*general.AllowLan)
+@@ -402,7 +410,7 @@
+ 	render.NoContent(w, r)
+ }
+ 
+-func updateConfigs(w http.ResponseWriter, r *http.Request) {
++func (generation *controllerGeneration) updateConfigs(w http.ResponseWriter, r *http.Request) {
+ 	req := struct {
+ 		Path    string `json:"path"`
+ 		Payload string `json:"payload"`
+@@ -414,16 +422,11 @@
+ 	}
+ 
+ 	force := r.URL.Query().Get("force") == "true"
+-	var cfg *config.Config
++	var contents []byte
+ 	var err error
+ 
+ 	if req.Payload != "" {
+-		cfg, err = executor.ParseWithBytes([]byte(req.Payload))
+-		if err != nil {
+-			render.Status(r, http.StatusBadRequest)
+-			render.JSON(w, r, newError(err.Error()))
+-			return
+-		}
++		contents = []byte(req.Payload)
+ 	} else {
+ 		if req.Path == "" { // default path unneeded any safe check
+ 			req.Path = C.Path.Config()
+@@ -441,7 +444,14 @@
+ 			}
+ 		}
+ 
+-		cfg, err = executor.ParseWithPath(req.Path)
++		// Keep only the raw file read outside the gate. Match executor's
++		// ParseWithPath readConfig checks, including its empty-file error.
++		if _, err = os.Stat(req.Path); !os.IsNotExist(err) {
++			contents, err = os.ReadFile(req.Path)
++			if err == nil && len(contents) == 0 {
++				err = fmt.Errorf("configuration file %s is empty", req.Path)
++			}
++		}
+ 		if err != nil {
+ 			render.Status(r, http.StatusBadRequest)
+ 			render.JSON(w, r, newError(err.Error()))
+@@ -449,6 +459,19 @@
+ 		}
+ 	}
+ 
++	if !generation.beginMutation(w, r) {
++		return
++	}
++	defer mutationMux.Unlock()
++
++	// Parsing temporarily changes globals and rolls them back. Both that
++	// rollback and ApplyConfig must finish before controller invalidation.
++	cfg, err := executor.ParseWithBytes(contents)
++	if err != nil {
++		render.Status(r, http.StatusBadRequest)
++		render.JSON(w, r, newError(err.Error()))
++		return
++	}
+ 	executor.ApplyConfig(cfg, force)
+ 	render.NoContent(w, r)
+ }
+--- a/dns/server.go
++++ b/dns/server.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"net"
++	"sync"
+ 
+ 	"github.com/metacubex/mihomo/common/sockopt"
+ 	"github.com/metacubex/mihomo/component/resolver"
+@@ -13,16 +14,18 @@
+ )
+ 
+ var (
+-	address string
+-	server  = &Server{}
++	serverMux sync.Mutex
++	address   string
++	server    = &Server{}
+ 
+ 	dnsDefaultTTL uint32 = 600
+ )
+ 
+ type Server struct {
+-	service   resolver.Service
+-	tcpServer *D.Server
+-	udpServer *D.Server
++	serviceMux sync.RWMutex
++	service    resolver.Service
++	tcpServer  *D.Server
++	udpServer  *D.Server
+ }
+ 
+ type serverHandler struct {
+@@ -32,7 +35,10 @@
+ 
+ // ServeDNS implement D.Handler ServeDNS
+ func (s serverHandler) ServeDNS(w D.ResponseWriter, r *D.Msg) {
+-	msg, err := s.service.ServeMsg(context.Background(), r)
++	s.serviceMux.RLock()
++	service := s.service
++	s.serviceMux.RUnlock()
++	msg, err := service.ServeMsg(context.Background(), r)
+ 	if err != nil {
+ 		m := new(D.Msg)
+ 		m.SetRcode(r, D.RcodeServerFailure)
+@@ -58,73 +64,57 @@
+ }
+ 
+ func (s *Server) SetService(service resolver.Service) {
++	s.serviceMux.Lock()
+ 	s.service = service
++	s.serviceMux.Unlock()
+ }
+ 
+ func ReCreateServer(addr string, lc C.InboundListenConfig, service resolver.Service) {
++	serverMux.Lock()
++	defer serverMux.Unlock()
+ 	if addr == address && service != nil {
+ 		server.SetService(service)
+ 		return
+ 	}
+-
+ 	if server.tcpServer != nil {
+ 		_ = server.tcpServer.Shutdown()
+-		server.tcpServer = nil
++		_ = server.tcpServer.Listener.Close()
+ 	}
+-
+ 	if server.udpServer != nil {
+ 		_ = server.udpServer.Shutdown()
+-		server.udpServer = nil
++		_ = server.udpServer.PacketConn.Close()
+ 	}
+-
+-	server.service = nil
++	// Old handlers keep their instance and service; they never read a new global.
++	server = &Server{}
+ 	address = ""
+-
+ 	if addr == "" || lc == nil || service == nil {
+ 		return
+ 	}
+-
+-	var err error
+-	defer func() {
+-		if err != nil {
+-			log.Errorln("Start DNS server error: %s", err.Error())
+-		}
+-	}()
+-
+ 	_, port, err := net.SplitHostPort(addr)
+ 	if port == "0" || port == "" || err != nil {
+ 		return
+ 	}
+-
+-	address = addr
+-	server = &Server{service: service}
+-
+-	go func() {
+-		p, err := lc.ListenPacket(context.Background(), "udp", addr)
+-		if err != nil {
+-			log.Errorln("Start DNS server(UDP) error: %s", err.Error())
+-			return
+-		}
+-
+-		if err := sockopt.UDPReuseaddr(p); err != nil {
+-			log.Warnln("Failed to Reuse UDP Address: %s", err)
+-		}
+-
+-		log.Infoln("DNS server(UDP) listening at: %s", p.LocalAddr().String())
+-		server.udpServer = &D.Server{Addr: addr, PacketConn: p, Handler: server.UDPHandler()}
+-		_ = server.udpServer.ActivateAndServe()
+-	}()
+-
+-	go func() {
+-		l, err := lc.Listen(context.Background(), "tcp", addr)
+-		if err != nil {
+-			log.Errorln("Start DNS server(TCP) error: %s", err.Error())
+-			return
+-		}
+-
+-		log.Infoln("DNS server(TCP) listening at: %s", l.Addr().String())
+-		server.tcpServer = &D.Server{Addr: addr, Listener: l, Handler: server.TCPHandler()}
+-		_ = server.tcpServer.ActivateAndServe()
+-	}()
+-
++	packet, err := lc.ListenPacket(context.Background(), "udp", addr)
++	if err != nil {
++		log.Errorln("Start DNS server(UDP) error: %s", err)
++		return
++	}
++	listener, err := lc.Listen(context.Background(), "tcp", addr)
++	if err != nil {
++		_ = packet.Close()
++		log.Errorln("Start DNS server(TCP) error: %s", err)
++		return
++	}
++	if err := sockopt.UDPReuseaddr(packet); err != nil {
++		log.Warnln("Failed to Reuse UDP Address: %s", err)
++	}
++	current := &Server{service: service}
++	udp := &D.Server{Addr: addr, PacketConn: packet, Handler: current.UDPHandler()}
++	tcp := &D.Server{Addr: addr, Listener: listener, Handler: current.TCPHandler()}
++	current.udpServer, current.tcpServer = udp, tcp
++	server, address = current, addr
++	log.Infoln("DNS server(UDP) listening at: %s", packet.LocalAddr())
++	log.Infoln("DNS server(TCP) listening at: %s", listener.Addr())
++	go func() { _ = udp.ActivateAndServe() }()
++	go func() { _ = tcp.ActivateAndServe() }()
+ }

@@ -24,6 +24,7 @@ export type PageKey =
   | 'proxies'
   | 'connections'
   | 'profiles'
+  | 'substore'
   | 'security'
   | 'rules'
   | 'logs'
@@ -40,6 +41,7 @@ const ICONS: Record<PageKey, ReactNode> = {
   connections: <IconLink />,
   security: <IconSecurity />,
   profiles: <IconProfiles />,
+  substore: <IconSliders />,
   rules: <IconRules />,
   logs: <IconLog />,
   override: <IconSliders />,
@@ -56,6 +58,7 @@ const LABELS: Record<PageKey, string> = {
   connections: '活动连接',
   security: '安全防护',
   profiles: '订阅管理',
+  substore: 'Sub-Store',
   rules: '分流规则',
   logs: '运行日志',
   override: '配置覆写',
@@ -66,7 +69,7 @@ const LABELS: Record<PageKey, string> = {
   settings: '设置',
 };
 
-const DAILY_ORDER: PageKey[] = ['overview', 'proxies', 'profiles'];
+const DAILY_ORDER: PageKey[] = ['overview', 'proxies', 'profiles', 'substore'];
 const NETWORK_ORDER: PageKey[] = ['connections', 'traffic', 'logs'];
 const CONFIG_ORDER: PageKey[] = ['rules', 'dns', 'security', 'override', 'resources', 'kernel'];
 

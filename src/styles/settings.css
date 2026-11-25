@@ -49,6 +49,16 @@
 .settings-prefix-error { width: 100%; margin: 0; color: var(--danger); font-size: var(--type-meta); line-height: var(--leading-body); overflow-wrap: anywhere; }
 .settings-about { margin: 14px 0 0; text-align: left; color: var(--text-secondary); font-size: var(--type-meta); }
 .settings-search-empty { display: none; }
+.backup-local-heading { margin-top:18px; }
+
+/* 云备份和弹窗表单共享连续行；控件列随容器宽度收缩。 */
+.field-row.form-row { display:grid; grid-template-columns:minmax(120px,1fr) minmax(0,1.3fr); align-items:center; gap:20px; min-height:52px; padding:10px 0; border-top:1px solid var(--border-soft); }
+.field-row.form-row:first-child { border-top:0; }
+.form-row .field-control { display:flex; align-items:center; justify-content:flex-end; width:100%; max-width:none; min-width:0; gap:8px; }
+.form-row .field-control > .input { width:100%; }
+.form-row .field-label { font-size:var(--type-label); font-weight:var(--weight-medium); color:var(--text-primary); }
+.form-row .field-hint { margin-top:4px; font-size:var(--type-meta); color:var(--text-secondary); line-height:var(--leading-body); }
+@media (max-width:650px) { .field-row.form-row { grid-template-columns:minmax(0,1fr); gap:8px; }.form-row .field-control { justify-content:flex-start; } }
 .settings-page.searching:empty + .settings-search-empty { display: block; }
 .settings-page .settings-section[aria-label='连接与后台'] { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:28px; align-items:start; }
 .settings-section[aria-label='连接与后台'] > .section-head { grid-column:1/-1; }

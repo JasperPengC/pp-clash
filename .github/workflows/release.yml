@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.5'
+          node-version: '24.18.0'
       - name: Validate application version and release reference
         env:
           RELEASE_REF: ${{ github.ref }}
@@ -40,6 +40,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Check source and workflow gates before starting builders
+        run: ./scripts/ci.sh preflight
       - name: Verify Android signing before starting builders
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -76,18 +82,22 @@ jobs:
             runner: macos-15-intel
             target: x86_64-apple-darwin
             arch: x86_64
+            runtime: darwin-x64
           - os: macos
             runner: macos-15
             target: aarch64-apple-darwin
             arch: aarch64
+            runtime: darwin-arm64
           - os: windows
             runner: windows-2022
             target: x86_64-pc-windows-msvc
             arch: x86_64
+            runtime: win-x64
           - os: windows
             runner: windows-2022
             target: aarch64-pc-windows-msvc
             arch: aarch64
+            runtime: win-arm64
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -98,7 +108,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.5'
+          node-version: '24.18.0'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -134,6 +144,14 @@ jobs:
           python-version: '3.12'
       - name: Prepare verified matching kernel
         run: python scripts/prepare-resources.py '${{ matrix.os }}' '${{ matrix.arch }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sub-store-engine
+          path: .cache/cloud-tools-20261121/runtime
+      - name: Prepare verified matching service runtime
+        run: |
+          node scripts/sub-store/prepare-runtime.cjs --target '${{ matrix.runtime }}'
+          python scripts/validate-sub-store-resources.py src-tauri/resources/sub-store '${{ matrix.arch }}' --platform '${{ matrix.os }}'
       - name: Build installer
         env:
           RELEASE_TARGET: ${{ matrix.target }}
@@ -161,9 +179,11 @@ jobs:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             arch: x86_64
+            runtime: linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: aarch64
+            runtime: linux-arm64
     runs-on: ${{ matrix.runner }}
     # 两种架构使用相同 glibc 2.35 基线，避免 ARM 包只能在 Ubuntu 24.04 启动。
     container: ubuntu:22.04
@@ -180,7 +200,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.5'
+          node-version: '24.18.0'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -188,6 +208,14 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Prepare verified matching kernel
         run: python3 scripts/prepare-resources.py linux '${{ matrix.arch }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sub-store-engine
+          path: .cache/cloud-tools-20261121/runtime
+      - name: Prepare verified matching service runtime
+        run: |
+          node scripts/sub-store/prepare-runtime.cjs --target '${{ matrix.runtime }}'
+          python3 scripts/validate-sub-store-resources.py src-tauri/resources/sub-store '${{ matrix.arch }}' --platform linux
       - name: Build deb, rpm and AppImage
         env:
           RELEASE_TARGET: ${{ matrix.target }}
@@ -209,6 +237,7 @@ jobs:
     uses: ./.github/workflows/android.yml
     with:
       release: true
+      engine_artifact: sub-store-engine
     secrets:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
@@ -226,7 +255,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.5'
+          node-version: '24.18.0'
       - uses: actions/download-artifact@v4
         with:
           pattern: installer-*

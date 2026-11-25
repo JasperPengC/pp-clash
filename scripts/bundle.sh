@@ -20,6 +20,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # src-tauri/resources/tray；不要在这里重新生成，避免旧 SVG 覆盖新猫头。
 [ -f src-tauri/icons/icon.png ] || { echo "缺少 src-tauri/icons/icon.png" >&2; exit 1; }
 [ -f src-tauri/icons/icon.icns ] || { echo "缺少 src-tauri/icons/icon.icns" >&2; exit 1; }
+if [ "${PPCLASH_COMPILE_ONLY:-0}" = "0" ]; then
+  SERVICE_ARCH="$(macos_resource_arch)"
+  SERVICE_PY="$(command -v python || command -v python3)"
+  "$SERVICE_PY" scripts/validate-sub-store-resources.py src-tauri/resources/sub-store "$SERVICE_ARCH"
+fi
 
 echo "▸ 构建前端"
 npm run build
@@ -60,6 +65,8 @@ cp src-tauri/icons/icon.icns "$APP/Contents/Resources/icon.icns"
 mkdir -p "$APP/Contents/Resources/resources"
 cp "$RESOURCE_ZIP" "$APP/Contents/Resources/resources/kernel.zip"
 validate_macos_bundle_resources "$APP/Contents/Resources/resources/kernel.zip"
+cp -R src-tauri/resources/sub-store "$APP/Contents/Resources/sub-store"
+"$SERVICE_PY" scripts/validate-sub-store-resources.py "$APP/Contents/Resources/sub-store" "$SERVICE_ARCH"
 
 echo "▸ 写 Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -76,7 +83,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
-  <key>LSMinimumSystemVersion</key><string>10.15</string>
+  <key>LSMinimumSystemVersion</key><string>13.5</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

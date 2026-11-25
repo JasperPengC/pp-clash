@@ -21,11 +21,24 @@ work="$root/.cache/android-build"
 mkdir -p "$work/bin"
 export PATH="$work/bin:$PATH"
 export GOBIN="$work/bin"
+for pair in "android-arm64 aarch64" "android-x64 x86_64"; do
+  read -r runtime_target runtime_arch <<< "$pair"
+  runtime_root="$root/src-tauri/resources/sub-store"
+  if ! python3 scripts/validate-sub-store-resources.py "$runtime_root" "$runtime_arch" --platform android \
+    || ! node scripts/sub-store/build-android-runtime.cjs --target "$runtime_target" --verify-elf "$runtime_root/$runtime_target/node"; then
+    node scripts/sub-store/build-android-runtime.cjs --target "$runtime_target"
+  fi
+done
 python3 scripts/prepare-android-geodata.py
 mobile="v0.0.0-20261117202452-47699113848a"
 go install "golang.org/x/mobile/cmd/gomobile@$mobile" "golang.org/x/mobile/cmd/gobind@$mobile"
+core_work="$work/patched-core"
+python3 scripts/prepare-android-core.py --output "$core_work"
 (
-  cd "$root/src-tauri/android-core"
+  # Gomobile generates a module of its own: use the prepared workspace's
+  # normal go.mod instead of a global -modfile that overrides that module.
+  export GOFLAGS='' GOWORK=off
+  cd "$core_work/core"
   go test -tags with_gvisor,cmfa ./mobile -count=1
   mihomo_version="$(go list -m -f '{{.Version}}' github.com/metacubex/mihomo)"
   gomobile bind -target=android/arm64,android/amd64 -androidapi 24 -tags with_gvisor,cmfa \

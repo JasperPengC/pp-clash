@@ -27,6 +27,47 @@ class UpdateFileProvider : FileProvider()
 @TauriPlugin
 class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
+    fun initializeCloudTools(invoke: Invoke) {
+        documentWorker.execute {
+            try {
+                CloudTools.initialize(activity, invoke.getArgs().getString("base"))
+                ResourceTools.initialize(activity, invoke.getArgs().getString("base"))
+                invoke.resolve(JSObject())
+            } catch (_: Exception) { invoke.reject("无法初始化 Android 云工具") }
+        }
+    }
+    @Command
+    fun listResourceFiles(invoke: Invoke) {
+        documentWorker.execute {
+            try { invoke.resolve(ResourceTools(activity).listResourceFiles(invoke.getArgs().getString("dir"))) }
+            catch (error: Exception) { invoke.reject(error.message ?: "无法读取资源列表") }
+        }
+    }
+    @Command
+    fun geoUpdateStatus(invoke: Invoke) {
+        documentWorker.execute {
+            try { invoke.resolve(ResourceTools(activity).geoUpdateStatus(invoke.getArgs().getString("dir"))) }
+            catch (error: Exception) { invoke.reject(error.message ?: "无法读取资源更新任务") }
+        }
+    }
+    @Command
+    fun downloadGeoResource(invoke: Invoke) {
+        documentWorker.execute {
+            try {
+                val args = invoke.getArgs()
+                invoke.resolve(ResourceTools(activity).downloadGeoResource(args.getString("dir"), args.getString("name"),
+                    args.getString("url"), args.optString("proxyUrl"), args.optString("mirrorPrefix")))
+            } catch (error: Exception) { invoke.reject(error.message ?: "无法更新数据库") }
+        }
+    }
+    @Command
+    fun reinstallBundledResources(invoke: Invoke) {
+        documentWorker.execute {
+            try { invoke.resolve(ResourceTools(activity).reinstallBundledResources(invoke.getArgs().getString("dir"))) }
+            catch (error: Exception) { invoke.reject(error.message ?: "无法恢复内置数据库") }
+        }
+    }
+    @Command
     fun setSystemTheme(invoke: Invoke) = activity.runOnUiThread {
         val light = invoke.getArgs().optBoolean("light")
         WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {

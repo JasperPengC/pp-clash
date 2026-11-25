@@ -1,6 +1,7 @@
 import { useId, useRef, useState } from 'react';
 import { useApp } from '../store/app';
 import type { CollectionRecipe, Profile } from '../domain/app';
+import { isAndroid } from '../core/platform';
 import { Dialog } from './Dialog';
 import { IconCheck, IconX } from './icons';
 import './profile-collection.css';
@@ -32,7 +33,7 @@ export function ProfileCollectionDialog({ profile, onClose }: { profile?: Profil
       finally { lock.current = false; setSaving(false); }
     }}>
       <header><h3 id={title}>{profile ? '编辑组合' : '组合订阅'}</h3><button type="button" className="icon-btn" disabled={saving} aria-label="关闭组合订阅" onClick={onClose}><IconX size={16}/></button></header>
-      <label>组合名称<input autoFocus className="input" value={name} placeholder="例如：日常节点" maxLength={80} disabled={disabled} onChange={e => setName(e.target.value)} /></label>
+      <label>组合名称<input autoFocus={!isAndroid} className="input" value={name} placeholder="例如：日常节点" maxLength={80} disabled={disabled} onChange={e => setName(e.target.value)} /></label>
       <fieldset disabled={disabled}><legend>来源订阅 <small>已选 {selected.length} 份</small></legend>
         <div className="collection-sources">{candidates.map(p => <button className="btn" key={p.id} type="button" aria-pressed={selected.includes(p.id)}
           disabled={!selected.includes(p.id) && selected.length >= 32}

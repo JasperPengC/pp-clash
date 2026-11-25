@@ -1,4 +1,5 @@
 import { Children, createContext, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState } from 'react';
+import { SETTINGS_CATEGORIES, usePageQuery, useViewPreference } from '../store/view-preferences';
 import type { ReactNode } from 'react';
 import { EmptyState, ReadError, Segmented, Select, Toggle } from '../components/ui';
 import { IconCheck, IconSearch, IconX } from '../components/icons';
@@ -11,7 +12,14 @@ import { APP_VERSION, UPDATE_REPO } from '../core/update';
 import { TEXT_SIZES } from '../store/text-size';
 import { WebDavBackup } from '../components/WebDavBackup';
 
-const SETTINGS_CATEGORIES = ['外观', '连接与后台', '下载', '备份与恢复', '诊断与日志', '应用更新', '页面与订阅'];
+type LocalBackupEntry = { name: string; size: number; mtimeMs?: number; mtime_ms?: number };
+
+function formatBackupTime(backup: LocalBackupEntry) {
+  const timestamp = backup.mtimeMs ?? backup.mtime_ms;
+  return typeof timestamp === 'number' && Number.isFinite(new Date(timestamp).getTime())
+    ? formatTime(timestamp) : '时间未知';
+}
+
 const SettingsFilter = createContext({ query: '', category: '全部' });
 const SEARCH_ALIASES: Record<string, string> = {
   '文字大小': '字号 字体 font size', '主题': '颜色 深色 浅色 theme',
@@ -126,8 +134,8 @@ function ThemePicker({ value, onChange }: { value: ThemeMode; onChange: (theme: 
 
 /** 分类独立展示，搜索跨分类；表单草稿由页面保存。 */
 export function SettingsPage() {
-  const [query, setQuery] = useState('');
-  const [category, setCategory] = useState('外观');
+  const [query, setQuery] = usePageQuery('settings');
+  const [category, setCategory] = useViewPreference('settingsCategory');
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const settings = useApp((s) => s.settings);
@@ -137,9 +145,7 @@ export function SettingsPage() {
   const updateInfo = useApp((s) => s.updateInfo);
 
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
-  const [backups, setBackups] = useState<
-    Array<{ name: string; size: number; mtimeMs: number }>
-  >([]);
+  const [backups, setBackups] = useState<LocalBackupEntry[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(isTauri);
   const [backupsError, setBackupsError] = useState<string | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
@@ -403,11 +409,12 @@ export function SettingsPage() {
               )}
             </Section>
 
-            <Section title="备份与恢复" desc="恢复会替换订阅、覆写与应用设置；恢复前自动保留当前备份">
-              <Row label="WebDAV 云备份" hint="在设备之间迁移订阅和覆写" control={<WebDavBackup />} />
+            <Section title="备份与恢复">
+              <WebDavBackup />
+              <div className="backup-local-heading"><h3 className="section-title">本地备份</h3></div>
               <Row
-                label="立即备份"
-                hint="保存到 backups/"
+                label="保存到此设备"
+                hint="恢复会替换订阅、覆写和应用设置；恢复前自动备份"
                 control={
                   <button type="button" className="btn" disabled={backupBusy || backupsLoading} onClick={() => void doBackup()}>
                     备份
@@ -419,7 +426,7 @@ export function SettingsPage() {
               {backups.slice(0, 3).map((b) => (
                 <Row
                   key={b.name}
-                  label={`${b.name.startsWith('state-before-') ? '恢复前 · ' : ''}${formatTime(b.mtimeMs)}`}
+                  label={`${b.name.startsWith('state-before-') ? '恢复前 · ' : ''}${formatBackupTime(b)}`}
                   hint={`${(b.size / 1024).toFixed(1)} KB`}
                   control={
                     <button

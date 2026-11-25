@@ -39,6 +39,35 @@ export function Toggle({
   );
 }
 
+export function Checkbox({ checked, onChange, indeterminate = false, ariaLabel, disabled = false, children, className = '' }: {
+  checked: boolean; onChange: (checked: boolean) => void; indeterminate?: boolean;
+  ariaLabel?: string; disabled?: boolean; children?: ReactNode; className?: string;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => { if (input.current) input.current.indeterminate = indeterminate; }, [indeterminate]);
+  return <label className={`checkbox${className ? ` ${className}` : ''}`}>
+    <input ref={input} className="checkbox-input" type="checkbox" checked={checked} disabled={disabled}
+      aria-label={ariaLabel} onChange={event => onChange(event.currentTarget.checked)} />
+    <span className="checkbox-mark" aria-hidden="true">{indeterminate ? <span /> : <IconCheck size={11} />}</span>
+    {children && <span className="checkbox-label">{children}</span>}
+  </label>;
+}
+
+export function FormRow({ label, hint, control, className = '', htmlFor }: {
+  label: ReactNode; hint?: ReactNode; control: ReactNode; className?: string; htmlFor?: string;
+}) {
+  const id = useId();
+  return <div className={`field-row form-row${className ? ` ${className}` : ''}`} role="group"
+    aria-labelledby={`${id}-label`} aria-describedby={hint ? `${id}-hint` : undefined}>
+    <div className="field-main">
+      {htmlFor ? <label className="field-label" id={`${id}-label`} htmlFor={htmlFor}>{label}</label>
+        : <div className="field-label" id={`${id}-label`}>{label}</div>}
+      {hint && <div className="field-hint" id={`${id}-hint`}>{hint}</div>}
+    </div>
+    <div className="field-control">{control}</div>
+  </div>;
+}
+
 export type PillTone = 'neutral' | 'muted' | 'accent' | 'ok' | 'warn' | 'bad';
 
 export type PillProps = HTMLAttributes<HTMLSpanElement> & {
@@ -128,7 +157,7 @@ export function Segmented<T extends string>({
   disabled = false,
   tabPanelId,
 }: {
-  options: Array<{ value: T; label: ReactNode }>;
+  options: Array<{ value: T; label: ReactNode; disabled?: boolean }>;
   value: T;
   onChange: (v: T) => void;
   ariaLabel?: string;
@@ -148,15 +177,18 @@ export function Segmented<T extends string>({
           aria-selected={tabPanelId ? o.value === value : undefined}
           aria-controls={tabPanelId}
           tabIndex={tabPanelId ? (o.value === value ? 0 : -1) : undefined}
-          disabled={disabled}
+          disabled={disabled || o.disabled}
           className={`seg-btn${o.value === value ? ' active' : ''}`}
           onClick={() => onChange(o.value)}
           onKeyDown={tabPanelId ? event => {
-            const current = options.findIndex(option => option.value === o.value);
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
-              : event.key === 'ArrowRight' ? (current + 1) % options.length
-              : event.key === 'ArrowLeft' ? (current - 1 + options.length) % options.length : -1;
-            if (next < 0) return;
+            const enabled = options.map((option, index) => ({ ...option, index })).filter(option => !option.disabled);
+            if (disabled || !enabled.length) return;
+            const current = enabled.findIndex(option => option.value === o.value);
+            const at = event.key === 'Home' ? 0 : event.key === 'End' ? enabled.length - 1
+              : event.key === 'ArrowRight' ? (current + 1) % enabled.length
+              : event.key === 'ArrowLeft' ? (current - 1 + enabled.length) % enabled.length : -1;
+            if (at < 0) return;
+            const next = enabled[at].index;
             event.preventDefault();
             onChange(options[next].value);
             event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();

@@ -1,14 +1,13 @@
 use crate::backup_cipher::MAX_FILE;
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
-use std::{
-    collections::BTreeSet,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use sha2::Digest;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 const MAX_LIST: usize = 2 * 1024 * 1024;
-const PROPERTIES: &str = r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"#;
+const PROPERTIES: &str = r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>"#;
 
 #[derive(Deserialize)]
 pub struct Connection {
@@ -24,19 +23,13 @@ pub struct Remote {
 }
 
 fn backup_name(name: &str) -> bool {
-    let Some(stem) = name
-        .strip_prefix("ppclash-")
-        .and_then(|s| s.strip_suffix(".ppbackup"))
-    else {
-        return false;
-    };
-    let Some((time, id)) = stem.split_once('-') else {
-        return false;
-    };
-    time.len() == 13
-        && time.bytes().all(|c| c.is_ascii_digit())
-        && id.len() == 32
-        && id.bytes().all(|c| c.is_ascii_hexdigit())
+    crate::backup_history::parse_name(name, "").is_some()
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 fn new_name() -> Result<String, String> {
@@ -79,18 +72,29 @@ async fn send(request: RequestBuilder, expected: &[StatusCode]) -> Result<Respon
     if expected.contains(&status) {
         return Ok(response);
     }
+    Err(status_message(status))
+}
+fn status_message(status: StatusCode) -> String {
     let message = match status.as_u16() {
         401 | 403 => "请检查 WebDAV 账号、密码与目录权限",
         404 => "WebDAV 目录或备份不存在",
+        301 | 302 | 303 | 307 | 308 => "WebDAV 地址发生重定向，请填写最终地址",
         412 => "远端已有同名备份",
         507 => "WebDAV 空间不足",
         _ => "WebDAV 服务返回异常",
     };
-    Err(format!("{message}（HTTP {}）", status.as_u16()))
+    format!("{message}（HTTP {}）", status.as_u16())
 }
 
 impl Remote {
     pub fn connect(connection: Connection) -> Result<Self, String> {
+        Self::connect_with_timeout(connection, Duration::from_secs(90))
+    }
+
+    pub(crate) fn connect_with_timeout(
+        connection: Connection,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         let mut directory =
             Url::parse(connection.endpoint.trim()).map_err(|_| "WebDAV 地址无效")?;
         if directory.host().is_none()
@@ -101,10 +105,13 @@ impl Remote {
         {
             return Err("请输入目录地址，账号和密码请单独填写".into());
         }
-        let loopback = matches!(
-            directory.host_str(),
-            Some("127.0.0.1" | "[::1]" | "localhost")
-        );
+        let loopback = directory.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
         if directory.scheme() != "https" && !(loopback && directory.scheme() == "http") {
             return Err("WebDAV 需要 HTTPS，本机回环地址可使用 HTTP".into());
         }
@@ -115,9 +122,10 @@ impl Remote {
                 .push("");
         }
         let client = Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(90))
+            .timeout(timeout)
             .build()
             .map_err(network_error)?;
         Ok(Self {
@@ -143,19 +151,122 @@ impl Remote {
         self.directory.join(name).map_err(|_| "备份地址无效".into())
     }
 
-    pub async fn upload(&self, bytes: Vec<u8>) -> Result<String, String> {
-        if bytes.len() > MAX_FILE {
-            return Err("加密备份过大".into());
+    async fn collection_exists(&self, url: Url) -> Result<bool, String> {
+        let response = self
+            .request(Method::from_bytes(b"PROPFIND").unwrap(), url.clone())
+            .header("Depth", "0")
+            .header("Content-Type", "application/xml; charset=utf-8")
+            .body(PROPERTIES)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(false);
         }
-        let name = new_name()?;
+        if response.status() != StatusCode::MULTI_STATUS {
+            return Err(status_message(response.status()));
+        }
+        let bytes = bounded(response, MAX_LIST).await?;
+        crate::backup_history::is_collection(&url, &bytes)
+    }
+    pub async fn ensure_directories(
+        &self,
+        settings: &crate::webdav_settings::Settings,
+    ) -> Result<(), String> {
+        let canonical = settings
+            .clone()
+            .normalize()
+            .map_err(|error| error.message)?;
+        if canonical.directory_url().map_err(|error| error.message)? != self.directory {
+            return Err("备份目录与保存设置不一致".into());
+        }
+        let mut url = Url::parse(&canonical.endpoint).map_err(|_| "WebDAV 地址无效")?;
+        if !self.collection_exists(url.clone()).await? {
+            return Err("WebDAV 服务器基础目录不存在".into());
+        }
+        for segment in canonical.directory.split('/') {
+            url = url
+                .join(&format!("{segment}/"))
+                .map_err(|_| "WebDAV 目录地址无效")?;
+            if !self.collection_exists(url.clone()).await? {
+                let response = self
+                    .request(Method::from_bytes(b"MKCOL").unwrap(), url.clone())
+                    .send()
+                    .await
+                    .map_err(network_error)?;
+                if ![
+                    StatusCode::CREATED,
+                    StatusCode::OK,
+                    StatusCode::NO_CONTENT,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                ]
+                .contains(&response.status())
+                {
+                    return Err(status_message(response.status()));
+                }
+                if !self.collection_exists(url.clone()).await? {
+                    return Err("WebDAV 未确认备份目录创建成功".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    pub async fn upload_named(&self, name: &str, bytes: Vec<u8>) -> Result<(), String> {
+        if bytes.len() > MAX_FILE.min(64 * 1024 * 1024) {
+            return Err("加密备份超过 64 MiB".into());
+        }
+        let digest = sha2::Sha256::digest(&bytes);
         send(
-            self.request(Method::PUT, self.file(&name)?)
+            self.request(Method::PUT, self.file(name)?)
                 .header("If-None-Match", "*")
                 .header("Content-Type", "application/octet-stream")
                 .body(bytes),
             &[StatusCode::CREATED, StatusCode::OK, StatusCode::NO_CONTENT],
         )
         .await?;
+        let readback = self.download(name).await?;
+        if sha2::Sha256::digest(&readback) != digest {
+            return Err("远端备份读回校验失败；未更新成功时间或清理历史".into());
+        }
+        Ok(())
+    }
+    pub async fn history(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::backup_history::BackupEntry>, String> {
+        let response = send(
+            self.request(
+                Method::from_bytes(b"PROPFIND").unwrap(),
+                self.directory.clone(),
+            )
+            .header("Depth", "1")
+            .header("Content-Type", "application/xml; charset=utf-8")
+            .body(PROPERTIES),
+            &[StatusCode::MULTI_STATUS],
+        )
+        .await?;
+        crate::backup_history::parse_listing(
+            &self.directory,
+            &bounded(response, MAX_LIST).await?,
+            id,
+        )
+    }
+    pub async fn delete(&self, name: &str) -> Result<bool, String> {
+        let response = send(
+            self.request(Method::DELETE, self.file(name)?),
+            &[
+                StatusCode::OK,
+                StatusCode::NO_CONTENT,
+                StatusCode::NOT_FOUND,
+            ],
+        )
+        .await?;
+        Ok(response.status() != StatusCode::NOT_FOUND)
+    }
+
+    pub async fn upload(&self, bytes: Vec<u8>) -> Result<String, String> {
+        let name = new_name()?;
+        self.upload_named(&name, bytes).await?;
         Ok(name)
     }
 
@@ -165,7 +276,7 @@ impl Remote {
             &[StatusCode::OK],
         )
         .await?;
-        bounded(response, MAX_FILE).await
+        bounded(response, MAX_FILE.min(64 * 1024 * 1024)).await
     }
 
     pub async fn list(&self) -> Result<Vec<String>, String> {
@@ -182,41 +293,10 @@ impl Remote {
 }
 
 fn listing(directory: &Url, bytes: &[u8]) -> Result<Vec<String>, String> {
-    #[derive(Deserialize)]
-    enum Listing {
-        #[serde(rename = "multistatus")]
-        MultiStatus {
-            #[serde(default)]
-            response: Vec<Entry>,
-        },
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        href: String,
-        status: Option<String>,
-    }
-    let Listing::MultiStatus { response } =
-        quick_xml::de::from_reader(bytes).map_err(|_| "无法读取 WebDAV 目录列表")?;
-    let mut names = BTreeSet::new();
-    for entry in response {
-        if entry.status.is_some_and(|s| {
-            !s.split_whitespace()
-                .nth(1)
-                .is_some_and(|code| code.starts_with('2'))
-        }) {
-            continue;
-        }
-        let Ok(url) = directory.join(&entry.href) else {
-            continue;
-        };
-        let Some(name) = url.path_segments().and_then(|mut parts| parts.next_back()) else {
-            continue;
-        };
-        if backup_name(name) && directory.join(name).as_ref() == Ok(&url) {
-            names.insert(name.to_owned());
-        }
-    }
-    Ok(names.into_iter().rev().collect())
+    Ok(crate::backup_history::parse_listing(directory, bytes, "")?
+        .into_iter()
+        .map(|row| row.name)
+        .collect())
 }
 
 #[cfg(test)]
@@ -228,6 +308,11 @@ mod tests {
             username: String::new(),
             password: String::new(),
         }
+    }
+    #[test]
+    fn saved_loopback_endpoints_keep_the_settings_capability() {
+        assert!(Remote::connect(connection("http://127.0.0.2:18888/dav")).is_ok());
+        assert!(Remote::connect(connection("http://127.0.0.2.example.invalid/dav")).is_err());
     }
     #[test]
     fn limits_names_and_directory() {

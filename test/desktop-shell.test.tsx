@@ -22,10 +22,10 @@ afterEach(async () => {
   host.remove();
 });
 
-it('侧栏保留十二个功能页，设置由主区工具栏承接', async () => {
+it('侧栏保留十三个功能页，设置由主区工具栏承接', async () => {
   const change = vi.fn();
   await act(async () => root.render(createElement(Sidebar, { current: 'overview', onChange: change })));
-  const pages: PageKey[] = ['overview', 'proxies', 'profiles', 'connections', 'traffic', 'logs', 'rules', 'dns', 'security', 'override', 'resources', 'kernel'];
+  const pages: PageKey[] = ['overview', 'proxies', 'profiles', 'substore', 'connections', 'traffic', 'logs', 'rules', 'dns', 'security', 'override', 'resources', 'kernel'];
   const buttons = [...host.querySelectorAll<HTMLButtonElement>('nav button')];
   expect(buttons).toHaveLength(pages.length);
   for (const button of buttons) await act(async () => button.click());
@@ -41,7 +41,7 @@ it('普通模式保留基本功能，侧栏不重复设置入口', async () => {
   useApp.setState({ settings: { ...DEFAULT_SETTINGS, advancedMode: false } });
   const change = vi.fn();
   await act(async () => root.render(createElement(Sidebar, { current: 'profiles', onChange: change })));
-  expect(host.querySelectorAll('nav button')).toHaveLength(5);
+  expect(host.querySelectorAll('nav button')).toHaveLength(6);
   expect(host.querySelector('nav[aria-label="配置与诊断"]')).toBeNull();
   expect(host.querySelector('nav[aria-label="工具"]')).toBeNull();
   expect(host.querySelector('nav[aria-label="设置"]')).toBeNull();
@@ -52,7 +52,7 @@ it('高级模式在原侧栏内响应更新，入口不丢失且不会重复跳�
   useApp.setState({ settings: { ...DEFAULT_SETTINGS, advancedMode: false } });
   await act(async () => root.render(createElement(Sidebar, { current: 'overview', onChange: change })));
   await act(async () => useApp.setState({ settings: { ...DEFAULT_SETTINGS, advancedMode: true } }));
-  expect(host.querySelectorAll('nav button')).toHaveLength(12);
+  expect(host.querySelectorAll('nav button')).toHaveLength(13);
   const dns = [...host.querySelectorAll<HTMLButtonElement>('nav button')].find(button => button.textContent === 'DNS 配置')!;
   await act(async () => dns.click());
   expect(change).toHaveBeenCalledExactlyOnceWith('dns');

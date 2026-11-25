@@ -1,5 +1,6 @@
 import { PageHeader } from '../components/PageHeader';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { usePageQuery, useViewPreference } from '../store/view-preferences';
 import { EmptyState, ReadError, Segmented } from '../components/ui';
 import { IconCode, IconDownload, IconPause, IconRefresh, IconSearch, IconX } from '../components/icons';
 import { isAndroid } from '../core/platform';
@@ -16,10 +17,10 @@ export function LogsPage({ active = true }: { active?: boolean }) {
   const connected = kernelPhase === 'running';
 
   const [text, setText] = useState('');
-  const [rawView, setRawView] = useState(false);
+  const [rawView, setRawView] = useViewPreference('logRaw');
   const [paused, setPaused] = useState(false);
-  const [level, setLevel] = useState<'all' | 'info' | 'warn' | 'error'>('all');
-  const [query, setQuery] = useState('');
+  const [level, setLevel] = useViewPreference('logLevel');
+  const [query, setQuery] = usePageQuery('logs');
   const [exporting, setExporting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState<string | null>(null);

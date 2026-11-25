@@ -36,8 +36,8 @@ fn windows_preflight() -> bool {
 
 
 #[cfg(not(target_os = "windows"))]
-fn unix_preflight() -> bool {
-    use std::process::{Command, Stdio};
+fn unix_preflight() -> Result<Option<std::fs::File>, String> {
+    use std::io::{Read, Seek, Write};
 
     let data = if cfg!(target_os = "macos") {
         std::env::var("HOME")
@@ -50,27 +50,53 @@ fn unix_preflight() -> bool {
             .or_else(|| std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".local/share")))
             .map(|p| p.join("PPClash"))
     };
-    let Some(data) = data else { return true };
-    let _ = std::fs::create_dir_all(&data);
+    let data = data.ok_or("无法定位应用数据目录")?;
+    std::fs::create_dir_all(&data).map_err(|e| format!("无法创建应用数据目录: {e}"))?;
     let lock = data.join("instance.lock");
-    if let Ok(text) = std::fs::read_to_string(&lock) {
-        if let Ok(pid) = text.trim().parse::<u32>() {
-            let alive = Command::new("/bin/kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if alive {
-                return false;
-            }
+    // 保持文件及句柄到进程退出，不能删除锁文件，否则并发启动会锁住不同 inode。
+    let mut file = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true).truncate(false)
+        .open(lock).map_err(|e| format!("无法打开应用实例锁: {e}"))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(e) => return Err(format!("无法取得应用实例锁: {e}")),
+    }
+    // 兼容仍只写 PID 的旧版本，但不能把 PID 被复用的其他进程当成本应用。
+    let mut bytes = Vec::new();
+    (&mut file).take(64).read_to_end(&mut bytes)
+        .map_err(|e| format!("无法读取应用实例锁: {e}"))?;
+    if let Ok(pid) = String::from_utf8_lossy(&bytes).trim().parse::<u32>() {
+        if legacy_instance_running(pid) {
+            return Ok(None);
         }
     }
-    let _ = std::fs::write(lock, std::process::id().to_string());
-    true
+    file.rewind().map_err(|e| format!("无法更新应用实例锁: {e}"))?;
+    file.set_len(0).map_err(|e| format!("无法更新应用实例锁: {e}"))?;
+    write!(file, "{}", std::process::id()).map_err(|e| format!("无法写入应用实例锁: {e}"))?;
+    Ok(Some(file))
 }
 
+#[cfg(not(target_os = "windows"))]
+fn legacy_instance_running(pid: u32) -> bool {
+    if pid <= 1 || pid == std::process::id() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    let executable = std::process::Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output().ok().filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| std::path::PathBuf::from(path.trim()));
+    #[cfg(not(target_os = "macos"))]
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|path| {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let bytes = path.as_os_str().as_bytes();
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(bytes.strip_suffix(b" (deleted)").unwrap_or(bytes).to_vec()))
+    });
+    executable.zip(std::env::current_exe().ok())
+        .is_some_and(|(other, current)| other.file_name().is_some() && other.file_name() == current.file_name())
+}
 
 #[cfg(target_os = "windows")]
 fn instance_running() -> bool {
@@ -160,8 +186,13 @@ fn main() {
         bootstrap_log("windows_preflight -> continue");
     }
     #[cfg(not(target_os = "windows"))]
-    if !unix_preflight() {
-        return;
-    }
+    let _instance_lock = match unix_preflight() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("[startup] {error}");
+            std::process::exit(1);
+        }
+    };
     ppclash_lib::run();
 }

@@ -6,14 +6,15 @@ import { ResourcesPage } from '../src/pages/Resources';
 import { KernelPage } from '../src/pages/Kernel';
 import { api } from '../src/core/api';
 import { useApp } from '../src/store/app';
+import { useViewPreferences } from '../src/store/view-preferences';
 
 const native = vi.hoisted(() => {
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
   return { invoke: vi.fn() };
 });
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
-const platform = vi.hoisted(() => ({ linux: false }));
-vi.mock('../src/core/platform', () => ({ isAndroid: false, isWindows: false, get isLinux() { return platform.linux; } }));
+const platform = vi.hoisted(() => ({ linux: false, android: false }));
+vi.mock('../src/core/platform', () => ({ get isAndroid() { return platform.android; }, isWindows: false, get isLinux() { return platform.linux; } }));
 vi.mock('../src/core/api', async original => {
   const actual = await original<typeof import('../src/core/api')>();
   return { ...actual, isTauri: true, api: Object.fromEntries(Object.keys(actual.api).map(key => [key, vi.fn().mockResolvedValue(undefined)])) };
@@ -27,7 +28,9 @@ const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('
 const click = async (element: HTMLElement) => { await act(async () => element.click()); };
 const render = async (Page: typeof ResourcesPage | typeof KernelPage) => { await act(async () => root.render(createElement(Page))); };
 beforeEach(() => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   platform.linux = false;
+  platform.android = false;
   vi.useFakeTimers(); vi.resetAllMocks();
   native.invoke.mockResolvedValue(undefined);
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -41,6 +44,14 @@ beforeEach(() => {
   vi.mocked(api.systemHelperInfo).mockResolvedValue({ installed: false, version: null, needsUpdate: false, path: '/mock' });
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); });
+
+it('Android资源页保留更新入口，隐藏不可用的桌面目录入口', async () => {
+  platform.android = true;
+  await render(ResourcesPage);
+  expect(host.querySelector('[aria-label="打开资源目录"]')).toBeNull();
+  expect(host.querySelector('[aria-label="刷新资源"]')).not.toBeNull();
+  expect(api.openDataDir).not.toHaveBeenCalled();
+});
 
 it('局域网认证或监听未就绪时不能开启，条件齐全后才可开启', async () => {
   await render(KernelPage);

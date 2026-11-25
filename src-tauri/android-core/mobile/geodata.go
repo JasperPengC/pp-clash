@@ -12,6 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/metacubex/mihomo/component/geodata"
+	"github.com/metacubex/mihomo/component/mmdb"
 )
 
 // Generated from scripts/resources.lock.json before compiling the core.
@@ -26,11 +29,35 @@ type geoEntry struct {
 
 var geoNames = []string{"geoip.metadb", "geoip.dat", "geosite.dat", "ASN.mmdb"}
 var verifiedGeoFiles = make(map[string]os.FileInfo)
+var geodataNeedsReload bool
 
 // Called under lifecycle before parsing any configuration, including imports.
-// Android uses pinned bundled data; app updates deliver new dataset revisions.
+// Valid user updates are retained; missing or damaged data is repaired offline.
 func ensureGeodata(dir string) error {
-	return installGeodata(dir, bundledGeodata, verifiedGeoFiles)
+	previous := make(map[string]os.FileInfo, len(geoNames))
+	for _, name := range geoNames {
+		path := geodataPath(dir, name)
+		previous[path], _ = os.Lstat(path)
+	}
+	if err := installGeodata(dir, bundledGeodata, verifiedGeoFiles); err != nil {
+		return err
+	}
+	for path, before := range previous {
+		after, err := os.Lstat(path)
+		if err == nil && (before == nil || !os.SameFile(before, after)) {
+			geodataNeedsReload = true
+		}
+	}
+	// Stop/Start keeps the Go process alive, so mihomo's cached matchers must be
+	// reset before the next configuration parse. Active VPN rules keep their data.
+	if geodataNeedsReload && tun == nil {
+		geodata.ClearGeoSiteCache()
+		geodata.ClearGeoIPCache()
+		mmdb.ReloadIP()
+		mmdb.ReloadASN()
+		geodataNeedsReload = false
+	}
+	return nil
 }
 
 func installGeodata(dir string, bundle []byte, verified map[string]os.FileInfo) error {
@@ -61,6 +88,9 @@ func installGeodata(dir string, bundle []byte, verified map[string]os.FileInfo) 
 			return fmt.Errorf("invalid offline dataset: %s", name)
 		}
 		path := geodataPath(dir, name)
+		if validUserGeodata(dir, path, name) {
+			continue
+		}
 		info, err := os.Lstat(path)
 		if err == nil && info.Mode().IsRegular() && info.Size() == entry.Size {
 			previous := verified[path]

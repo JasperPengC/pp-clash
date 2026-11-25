@@ -19,6 +19,15 @@ mod backup_cipher;
 mod portable_backup;
 mod webdav;
 mod webdav_commands;
+mod webdav_settings;
+mod credential_store;
+mod backup_history;
+mod backup_scheduler;
+mod webdav_backup;
+mod backup_sub_store;
+mod complete_restore_state;
+mod sub_store_service;
+mod sub_store_commands;
 mod mihomo;
 mod platform;
 mod subscription;
@@ -141,6 +150,24 @@ pub fn run() {
             webdav_commands::webdav_upload,
             webdav_commands::webdav_preview,
             webdav_commands::webdav_restore,
+            webdav_commands::get_webdav_settings,
+            webdav_commands::save_webdav_settings,
+            webdav_commands::test_webdav_connection,
+            webdav_commands::webdav_backup_status,
+            webdav_commands::webdav_backup_now,
+            webdav_commands::webdav_backup_history,
+            webdav_commands::webdav_backup_delete,
+            webdav_commands::webdav_saved_preview,
+            webdav_commands::webdav_saved_restore,
+            sub_store_commands::sub_store_status,
+            sub_store_commands::sub_store_start,
+            sub_store_commands::sub_store_stop,
+            sub_store_commands::sub_store_request,
+            sub_store_commands::sub_store_preview_prepare,
+            sub_store_commands::sub_store_preview,
+            sub_store_commands::sub_store_preview_cancel,
+            sub_store_commands::sub_store_snapshot,
+            sub_store_commands::sub_store_restore_snapshot,
             mihomo::mihomo_request,
             sysproxy::set_system_proxy,
             sysproxy::get_system_proxy,
@@ -173,6 +200,8 @@ pub fn run() {
         ])
         .setup(|app| {
             disable_automatic_termination();
+            backup_sub_store::recover(&platform::data_dir()?).map_err(std::io::Error::other)?;
+            webdav_commands::start_scheduler(app.handle().clone());
             // 看门狗会拉起 PowerShell（Windows），延后到首屏之后再启动，避免拖慢冷启动。
             let watchdog_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -319,6 +348,14 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
+            focus_main(app_handle);
+        }
+        if let tauri::RunEvent::Exit = event {
+            webdav_commands::shutdown_scheduler();
+            sub_store_commands::shutdown();
+        }
         if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
             // 用户点红点 / Cmd+W 关闭最后一个窗口时，Tauri 会请求退出；
             // 开了「关窗到托盘」且窗口已隐藏时拦下，让进程和菜单栏继续常驻。

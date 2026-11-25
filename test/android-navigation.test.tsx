@@ -3,6 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useApp } from '../src/store/app';
+import { useViewPreferences } from '../src/store/view-preferences';
 import { latencyTone } from '../src/core/latency';
 import AndroidWindow from '../src/bootstrap/android-window';
 import { APP_VERSION } from '../src/core/update';
@@ -23,6 +24,7 @@ let host: HTMLDivElement;
 let root: Root;
 const initial = useApp.getInitialState();
 beforeEach(() => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.documentElement.classList.add('android-window');
   window.history.replaceState({}, '');
@@ -93,6 +95,17 @@ it('工具页提供可触摸的返回按钮', async () => {
   await act(async () => { button!.click(); });
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
   expect(currentPage()).toBe('more');
+});
+
+it('Android更多入口提供Sub-Store并支持恢复工具页返回', async () => {
+  window.history.replaceState({ ppclashPage: 'sub-store' }, '');
+  await render();
+  expect(currentPage()).toBe('sub-store');
+  await back();
+  expect(currentPage()).toBe('more');
+  expect([...host.querySelectorAll('button')].some(button => button.textContent === 'Sub-Store')).toBe(true);
+  expect([...host.querySelectorAll('button')].some(button => button.textContent === '覆写配置')).toBe(true);
+  expect([...host.querySelectorAll('button')].some(button => button.textContent === '资源管理')).toBe(true);
 });
 
 it('主导航把当前页直接标记为选中，并响应 Android IME 高度', async () => {
@@ -232,4 +245,18 @@ it('设置显示版本并提供更新入口，下载中阻止重复安装', asyn
   expect(install!.disabled).toBe(true);
   await act(async () => install!.click());
   expect(downloadUpdate).toHaveBeenCalledTimes(1);
+});
+
+it('手机订阅页可打开组合，不主动弹出键盘，系统返回只收起弹窗', async () => {
+  await render();
+  await click('订阅');
+  await act(async () => { await vi.dynamicImportSettled(); });
+  const entry = host.querySelector<HTMLButtonElement>('[aria-label="组合订阅"]');
+  expect(entry).not.toBeNull();
+  await act(async () => entry!.click());
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('先添加两份来源订阅');
+  expect(document.activeElement?.tagName).not.toBe('INPUT');
+  await back();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(currentPage()).toBe('profiles');
 });

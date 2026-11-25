@@ -28,6 +28,7 @@ const TrafficPage = asyncView(() => import('./pages/Traffic').then(module => ({ 
 const DnsPage = asyncView(() => import('./pages/Dns').then(module => ({ default: module.DnsPage })));
 const SecurityPage = asyncView(() => import('./pages/Security').then(module => ({ default: module.SecurityPage })));
 const ProfilesPage = asyncView(() => import('./pages/Profiles').then(module => ({ default: module.ProfilesPage })));
+const SubStorePage = asyncView(() => import('./pages/SubStore').then(module => ({ default: module.SubStorePage })));
 const SettingsPage = asyncView(() => import('./pages/Settings').then(module => ({ default: module.SettingsPage })));
 
 const TOAST_TTL = 5000;
@@ -38,6 +39,7 @@ const PAGE_KEYS: PageKey[] = [
   'connections',
   'security',
   'profiles',
+  'substore',
   'rules',
   'logs',
   'override',
@@ -187,7 +189,7 @@ export default function App() {
   useEffect(() => {
     const onNav = (e: Event) => {
       const target = (e as CustomEvent<string>).detail as PageKey;
-      if (['overview', 'proxies', 'connections', 'security', 'profiles', 'rules', 'logs', 'override', 'kernel', 'resources', 'traffic', 'dns', 'settings'].includes(target)) {
+      if (PAGE_KEYS.includes(target)) {
         setPage(target);
       }
     };
@@ -310,6 +312,7 @@ export default function App() {
             {page === 'dns' && <DnsPage />}
             {page === 'security' && <SecurityPage />}
             {page === 'profiles' && <ProfilesPage />}
+            {page === 'substore' && <SubStorePage />}
             {page === 'settings' && <SettingsPage />}
           </div>
         )}

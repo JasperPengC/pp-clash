@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "version": "24.18.0",
+  "source": {
+    "archive": "node-v24.18.0.tar.xz",
+    "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0.tar.xz",
+    "sha256": "e94afde24db08e0c564ee7110a2d5aab51ee0059382c9fd8233c54eec47b28f9"
+  },
+  "ndkVersion": "28.2.13676358",
+  "androidApi": 24,
+  "pageSize": 16384,
+  "features": [
+    "worker_threads",
+    "child_process",
+    "sqlite",
+    "tls"
+  ],
+  "configure": [
+    "--dest-os=android",
+    "--openssl-no-asm",
+    "--cross-compiling"
+  ],
+  "targetLdflags": [
+    "-static-libstdc++",
+    "-Wl,-z,max-page-size=16384",
+    "-pie"
+  ],
+  "targets": {
+    "android-arm64": {
+      "arch": "arm64",
+      "triple": "aarch64-linux-android",
+      "elfMachine": 183
+    },
+    "android-x64": {
+      "arch": "x64",
+      "triple": "x86_64-linux-android",
+      "elfMachine": 62
+    }
+  },
+  "darwinPatch": {
+    "path": "scripts/sub-store/android-darwin-host.patch",
+    "sha256": "3ad3515d1ba28a848288cde5153917c9c0beb5a6c35ac5728a5699a026af1c41",
+    "files": {
+      "deps/uv/uv.gyp": {
+        "before": "5dc464a84a8fb3dc3798325869db22ab3cd0d8815bb463580d182323929a7dec",
+        "after": "cf3ade453a958ea8e035e428c8379ba89808ba94f95dca882dd91c70b4a2961e"
+      },
+      "tools/v8_gypfiles/v8.gyp": {
+        "before": "179391dc0b29757d47a74c7ba82a53161d7b3d4aa4ba3708e6ef79eed897e922",
+        "after": "c6dad67fc23e9283dd9478615faccdf36344303eaea8c539e84a392f592c65e6"
+      },
+      "tools/gyp/pylib/gyp/generator/make.py": {
+        "before": "0ce6c09023c2cf4fa48f2c5d17d0f6c96ff6debc44df5d8477bbee6eb33dc0ca",
+        "after": "6f86ff4c0b7f33c2ccbfae5724a4ca2f07e80086183d41b738bb1392b6996c67"
+      }
+    }
+  },
+  "darwinHostLdflags": [
+    "-framework",
+    "CoreFoundation"
+  ],
+  "androidPatch": {
+    "path": "scripts/sub-store/android-target.patch",
+    "sha256": "b81c3ead95e7df5f5224f78bd9f072cd763a4229d77d31d62ee3e1da513c3dfa",
+    "files": {
+      "deps/zlib/cpu_features.c": {
+        "before": "c1504072e83f8187aaaf73430ffb2464384b17e544eb2e243f4c3029d555fca7",
+        "after": "f6ac2d78603fc9666464b8f1e690a4436b1d7373900d0265c3381909da5ea202"
+      }
+    }
+  }
+}

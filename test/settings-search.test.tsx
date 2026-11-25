@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { SettingsPage } from '../src/pages/Settings';
 import { DEFAULT_SETTINGS, useApp } from '../src/store/app';
+import { useViewPreferences } from '../src/store/view-preferences';
 
 vi.mock('../src/core/api', async original => {
   const actual = await original<typeof import('../src/core/api')>();
@@ -13,6 +14,7 @@ vi.mock('../src/core/api', async original => {
 let host: HTMLDivElement; let root: Root;
 const update = vi.fn();
 beforeEach(async () => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   update.mockReset();
   useApp.setState({ settings: { ...DEFAULT_SETTINGS, githubProxy: 'https://custom.example/' }, profiles: [], groups: [],
@@ -36,6 +38,7 @@ async function click(text: string) {
 const proxyChoice = () => host.querySelector<HTMLButtonElement>('[aria-label="GitHub 下载代理"]')!;
 it('默认只打开外观分类，主题拥有完整区域；搜索跨分类且清空后回到原分类', async () => {
   await act(async () => root.render(null));
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   await act(async () => root.render(createElement(SettingsPage)));
   expect([...host.querySelectorAll('.settings-section')].map(section => section.getAttribute('aria-label'))).toEqual(['外观']);
   expect(host.querySelector('.settings-category[aria-pressed="true"]')?.textContent).toBe('外观');

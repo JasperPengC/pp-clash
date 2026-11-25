@@ -1,0 +1,10 @@
+{
+  "repository": "sub-store-org/Sub-Store",
+  "version": "2.44.16",
+  "commit": "2a173b88dcbd7d232864f05087998855da59eec1",
+  "archiveSha256": "a407caf6699561c842946d2d3594cbcf43cd8b1e43894308443f33d27bb9888d",
+  "upstreamLockSha256": "2507154f32f62ca72693f2ae704a345b9093bcb9eedd6fefa161ab49c33b52e1",
+  "packageManager": "pnpm@11.0.9",
+  "parser": "acorn@8.19.0",
+  "officialBundleSha256": "22cc47cfc0aad81fab5bc88d61543088e3e41d2ab2f3bcbf0c196e473f1417cc"
+}

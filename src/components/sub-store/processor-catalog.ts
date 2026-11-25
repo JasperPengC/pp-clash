@@ -1,0 +1,15 @@
+export const PROCESSORS = [
+  { type: 'Regex Filter', label: '正则筛选', args: { regex: [], keep: true } },
+  { type: 'Region Filter', label: '地区筛选', args: { value: [], keep: false } },
+  { type: 'Type Filter', label: '协议筛选', args: { value: [], keep: false } },
+  { type: 'Useless Filter', label: '过滤无效信息', args: {} },
+  { type: 'Regex Rename Operator', label: '正则重命名', args: [] },
+  { type: 'Handle Duplicate Operator', label: '重复节点处理', args: { action: 'rename', field: ['name'], template: '0 1 2 3 4 5 6 7 8 9', link: '-', position: 'back' } },
+  { type: 'Flag Operator', label: '旗标处理', args: { mode: 'add', tw: 'tw' } },
+  { type: 'Sort Operator', label: '名称排序', args: 'asc' },
+  { type: 'Regex Sort Operator', label: '正则排序', args: { expressions: [], order: 'asc' } },
+  { type: 'Quick Setting Operator', label: '快捷参数', args: {} },
+  { type: 'Resolve Domain Operator', label: '域名解析', args: { provider: 'Custom', type: 'IPv4', filter: 'disabled', cache: 'enabled' } },
+  { type: 'Script Operator', label: '脚本处理', args: { mode: 'script', content: '' } },
+  { type: 'Response Transformer', label: '响应脚本', args: { mode: 'script', content: '' } },
+];

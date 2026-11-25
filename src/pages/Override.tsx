@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useViewPreference } from '../store/view-preferences';
 import { EmptyState, MiniSwitch, Segmented, Spinner, Toggle } from '../components/ui';
 import CodeEditor from '../components/CodeEditor';
 import { validateOverrideSource } from '../core/override-syntax';
@@ -47,7 +48,7 @@ export function OverridePage() {
   const notify = useApp((s) => s.notify);
 
   const files = settings.overrides;
-  const [selectedId, setSelectedId] = useState<string | undefined>(files[0]?.id);
+  const [selectedId, setSelectedId] = useViewPreference('overrideId');
   const selected = useMemo(
     () => files.find((f) => f.id === selectedId) ?? files[0],
     [files, selectedId]
@@ -96,7 +97,7 @@ export function OverridePage() {
     if (files.length > 0 && !files.some((f) => f.id === selectedId)) {
       setSelectedId(files[0].id);
     }
-    if (files.length === 0 && selectedId) setSelectedId(undefined);
+    if (files.length === 0 && selectedId) setSelectedId('');
   }, [files, selectedId]);
 
   const selectFile = (id: string) => setSelectedId(id);

@@ -14,9 +14,11 @@ import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/config"
 	"github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/hub"
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/hub/route"
+	"github.com/metacubex/mihomo/listener"
 	listenerConfig "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/sing_tun"
 	"github.com/metacubex/mihomo/log"
@@ -149,6 +151,9 @@ func clearProtector() {
 }
 
 func stopCore() {
+	// Invalidate controller generations and wait for entered configuration
+	// parsing/mutations before closing the listeners they can recreate.
+	route.ReCreateServer(&route.Config{})
 	if tun != nil {
 		_ = tun.Close()
 		tun = nil
@@ -158,16 +163,26 @@ func stopCore() {
 		return true
 	})
 	executor.Shutdown()
-	route.ReCreateServer(&route.Config{})
+	// Mihomo's process shutdown only closes its TUN listener. Android keeps this
+	// process alive after disconnect, so every configured inbound must be closed.
+	listener.ReCreateHTTP(0, tunnel.Tunnel)
+	listener.ReCreateSocks(0, tunnel.Tunnel)
+	listener.ReCreateRedir(0, tunnel.Tunnel)
+	listener.ReCreateTProxy(0, tunnel.Tunnel)
+	listener.ReCreateMixed(0, tunnel.Tunnel)
+	listener.ReCreateShadowSocks("", tunnel.Tunnel)
+	listener.ReCreateVmess("", tunnel.Tunnel)
+	listener.ReCreateTuic(listenerConfig.TuicServer{}, tunnel.Tunnel)
+	listener.PatchTunnel(nil, tunnel.Tunnel)
+	listener.PatchInboundListeners(nil, tunnel.Tunnel, true)
+	dns.ReCreateServer("", nil, nil)
 	clearProtector()
 }
 
 func Stop() {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
-	if tun != nil {
-		stopCore()
-	}
+	stopCore()
 }
 
 func Version() string { return constant.Version }

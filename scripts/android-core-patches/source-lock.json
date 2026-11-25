@@ -1,0 +1,20 @@
+{
+  "module": "github.com/metacubex/mihomo",
+  "version": "v1.19.34",
+  "patch": "server-lifecycle.patch",
+  "patchSha256": "5b240c9dc54bb4936d4152ceed58835f2fb36687be74500e0d64ba0a7ed412b6",
+  "files": {
+    "hub/route/server.go": {
+      "sourceSha256": "01724bd82002cf80b85448ef664ca53a7cb82f529ccf2b7f4a6383282768d256",
+      "patchedSha256": "d560f667bfdc5e1b95a30924199ee8635bad1b8cdd67732df8c517a68b5fbdcf"
+    },
+    "dns/server.go": {
+      "sourceSha256": "a825b81da408052892bbc5333525e39a79eff5113895ae63cc0bcc60442d763b",
+      "patchedSha256": "67b3f979226dcb918602b42ebcacbdd36262201257883e74d48cbe13bf963856"
+    },
+    "hub/route/configs.go": {
+      "sourceSha256": "3883b84b729ec0e864ecff724f1059d6f81ba58e78d0b944e7e647851244a222",
+      "patchedSha256": "4a23d58ee531a61c43062ac5412c82bf4a752a2be45206051f4023988dd90458"
+    }
+  }
+}

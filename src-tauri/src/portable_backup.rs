@@ -23,6 +23,12 @@ struct Document {
     version: u32,
     device: String,
     state: Value,
+    #[serde(
+        default,
+        rename = "subStoreSnapshot",
+        skip_serializing_if = "Option::is_none"
+    )]
+    sub_store_snapshot: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -31,6 +37,7 @@ pub struct Preview {
     device: String,
     profiles: usize,
     collections: usize,
+    sub_store_entries: usize,
 }
 
 fn project(source: &Value, fields: &[&str]) -> Map<String, Value> {
@@ -75,18 +82,73 @@ pub fn export(bytes: &[u8], device: &str) -> Result<Vec<u8>, String> {
         version: 1,
         device: device.into(),
         state: portable(&source)?,
+        sub_store_snapshot: None,
     })
     .map_err(|e| e.to_string())
 }
 
 fn read(bytes: &[u8]) -> Result<Document, String> {
     let mut doc: Document = serde_json::from_slice(bytes).map_err(|_| "无法读取跨设备备份")?;
-    if doc.format != "ppclash-portable" || doc.version != 1 {
+    if doc.format != "ppclash-portable" || ![1, 2].contains(&doc.version) {
         return Err("不支持的跨设备备份版本".into());
     }
     doc.state = portable(&doc.state)?;
     backup_state::validate(&doc.state)?;
+    if let Some(snapshot) = &doc.sub_store_snapshot {
+        if doc.version != 2 {
+            return Err("旧格式不能包含 Sub-Store 快照".into());
+        }
+        validate_sub_store_snapshot(snapshot)?;
+    }
     Ok(doc)
+}
+
+fn validate_sub_store_snapshot(snapshot: &Value) -> Result<(), String> {
+    let data = snapshot
+        .get("files")
+        .and_then(Value::as_object)
+        .ok_or("备份缺少 Sub-Store 文件")?;
+    if snapshot.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+        || snapshot.get("engineVersion").and_then(Value::as_str) != Some("2.44.16")
+        || data.len() != 2
+        || !data.get("root.json").is_some_and(Value::is_object)
+        || !data.get("sub-store.json").is_some_and(Value::is_object)
+    {
+        return Err("Sub-Store 备份版本或文件格式无效".into());
+    }
+    for key in [
+        "subs",
+        "collections",
+        "files",
+        "artifacts",
+        "tokens",
+        "archives",
+    ] {
+        if data["sub-store.json"]
+            .get(key)
+            .is_some_and(|value| !value.is_array())
+        {
+            return Err(format!("Sub-Store 备份字段 {key} 格式无效"));
+        }
+    }
+    Ok(())
+}
+
+pub fn export_with_sub_store(
+    bytes: &[u8],
+    device: &str,
+    snapshot: Value,
+) -> Result<Vec<u8>, String> {
+    validate_sub_store_snapshot(&snapshot)?;
+    let mut doc: Document =
+        serde_json::from_slice(&export(bytes, device)?).map_err(|e| e.to_string())?;
+    doc.version = 2;
+    doc.sub_store_snapshot = Some(snapshot);
+    serde_json::to_vec(&doc).map_err(|e| e.to_string())
+}
+
+pub fn sub_store_snapshot(bytes: &[u8]) -> Result<Option<Value>, String> {
+    Ok(read(bytes)?.sub_store_snapshot)
 }
 
 pub fn preview(bytes: &[u8]) -> Result<Preview, String> {
@@ -95,7 +157,24 @@ pub fn preview(bytes: &[u8]) -> Result<Preview, String> {
     Ok(Preview {
         device: doc.device,
         profiles: profiles.len(),
-        collections: profiles.iter().filter(|p| p["sourceType"] == "collection").count(),
+        collections: profiles
+            .iter()
+            .filter(|p| p["sourceType"] == "collection")
+            .count(),
+        sub_store_entries: doc
+            .sub_store_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                ["subs", "collections", "files"]
+                    .iter()
+                    .map(|key| {
+                        snapshot["files"]["sub-store.json"][key]
+                            .as_array()
+                            .map_or(0, Vec::len)
+                    })
+                    .sum()
+            })
+            .unwrap_or(0),
     })
 }
 
@@ -150,6 +229,25 @@ pub fn merge(current: &[u8], incoming: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     #[test]
+    fn full_sub_store_snapshot_preserves_advanced_fields_and_profile_links() {
+        let state = br#"{"profiles":[{"id":"a","name":"A","url":"","raw":"a","sourceType":"substore","subStore":{"kind":"collection","name":"daily"}}]}"#;
+        let snapshot = serde_json::json!({"schemaVersion":1,"engineVersion":"2.44.16","files":{"root.json":{"advanced":{"retained":true}},"sub-store.json":{"subs":[],"collections":[{"name":"daily","process":[{"type":"Script Operator","args":{"content":"function operator(p) { return p; }","custom":"keep"}}]}],"files":[{"name":"rules","content":"custom"}],"unknownAdvanced":[1,2,3]}}});
+        let data = export_with_sub_store(state, "Desktop", snapshot.clone()).unwrap();
+        assert_eq!(sub_store_snapshot(&data).unwrap(), Some(snapshot));
+        assert_eq!(preview(&data).unwrap().sub_store_entries, 2);
+        let merged: Value =
+            serde_json::from_slice(&merge(br#"{"profiles":[]}"#, &data).unwrap()).unwrap();
+        assert_eq!(merged["profiles"][0]["subStore"]["name"], "daily");
+        assert!(merged.get("subStoreSnapshot").is_none());
+    }
+
+    #[test]
+    fn rejects_bad_sub_store_snapshot_before_restore() {
+        let bytes = br#"{"profiles":[]}"#;
+        assert!(export_with_sub_store(bytes, "Desktop", serde_json::json!({"schemaVersion":1,"engineVersion":"2.44.16","files":{"../escape":{},"root.json":{}}})).is_err());
+        assert!(sub_store_snapshot(br#"{"format":"ppclash-portable","version":3,"device":"Desktop","state":{"profiles":[]}}"#).is_err());
+    }
+    #[test]
     fn collection_recipe_survives_portable_restore() {
         let source = serde_json::json!({"profiles":[
             {"id":"a","name":"A","url":"","raw":"a","sourceType":"file"},
@@ -160,7 +258,8 @@ mod tests {
         let document = export(&serde_json::to_vec(&source).unwrap(), "Desktop").unwrap();
         let summary = preview(&document).unwrap();
         assert_eq!((summary.profiles, summary.collections), (3, 1));
-        let restored: Value = serde_json::from_slice(&merge(br#"{"profiles":[]}"#, &document).unwrap()).unwrap();
+        let restored: Value =
+            serde_json::from_slice(&merge(br#"{"profiles":[]}"#, &document).unwrap()).unwrap();
         assert_eq!(restored["profiles"], source["profiles"]);
         assert_eq!(restored["activeId"], "c");
     }

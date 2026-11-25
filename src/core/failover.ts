@@ -1,5 +1,6 @@
 export const CHECK_INTERVAL = 120_000;
 export const SWITCH_COOLDOWN = 600_000;
+export const MAX_CHECK_DURATION = 45_000;
 export type HealthResult = Record<string, boolean | null>;
 
 /** 仅统计同一出口、连续且间隔正常的确定失败。null 表示控制器/检测异常。 */
@@ -13,9 +14,9 @@ export class FailoverGuard {
     this.reset();
   }
   reset() { this.key = ''; this.lastCheck = undefined; this.failures = {}; }
-  observe(key: string, result: HealthResult, now: number): boolean {
+  observe(key: string, result: HealthResult, now: number, maxGap = CHECK_INTERVAL * 2): boolean {
     if (now < this.cooldownUntil) { this.reset(); return false; }
-    if (key !== this.key || (this.lastCheck !== undefined && now - this.lastCheck > CHECK_INTERVAL * 2)) {
+    if (key !== this.key || (this.lastCheck !== undefined && now - this.lastCheck > maxGap)) {
       this.reset();
       this.key = key;
     }
@@ -34,6 +35,8 @@ interface FailoverAdapter {
   now: () => number;
   probe: (node: string) => Promise<HealthResult>;
   switchTo: (node: string, original: FailoverTarget) => Promise<void>;
+  /** 串行检查多组时，调用层将已验证的正常处理耗时计入允许间隔。 */
+  maxCheckGap?: () => number;
 }
 
 export class FailoverCoordinator {
@@ -49,7 +52,7 @@ export class FailoverCoordinator {
     const started = this.adapter.now();
     const stillCurrent = () => {
       const age = this.adapter.now() - started;
-      const valid = age >= 0 && age <= 45_000 && this.adapter.target()?.key === target.key;
+      const valid = age >= 0 && age <= MAX_CHECK_DURATION && this.adapter.target()?.key === target.key;
       if (!valid) this.guard.reset();
       return valid;
     };
@@ -57,7 +60,7 @@ export class FailoverCoordinator {
     try {
       const health = await this.adapter.probe(target.node);
       if (!stillCurrent()) { this.guard.reset(); return; }
-      if (!this.guard.observe(target.key, health, this.adapter.now())) return;
+      if (!this.guard.observe(target.key, health, this.adapter.now(), this.adapter.maxCheckGap?.())) return;
       if (this.candidateRoute !== target.key) { this.candidateRoute = target.key; this.candidateCursor = 0; }
       const candidates = [...new Set(target.candidates)].filter(n => n !== target.node);
       const batch = Array.from({ length: Math.min(3, candidates.length) }, (_, i) => candidates[(this.candidateCursor + i) % candidates.length]);

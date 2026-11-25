@@ -6,6 +6,7 @@ import { ConnectionsPage } from '../src/pages/Connections';
 import { LogsPage } from '../src/pages/Logs';
 import { TrafficPage } from '../src/pages/Traffic';
 import { save } from '@tauri-apps/plugin-dialog';
+import { useViewPreferences } from '../src/store/view-preferences';
 
 const mock = vi.hoisted(() => ({ mihomo: vi.fn(), readKernelLog: vi.fn(), notify: vi.fn(), resolveProcessIcon: vi.fn(), exportLogFile: vi.fn() }));
 vi.mock('../src/core/api', () => ({ isTauri: true, api: mock }));
@@ -24,6 +25,7 @@ const render = async (Page: ComponentType<{ active?: boolean }>, active = true) 
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
 beforeEach(() => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   vi.useFakeTimers(); vi.resetAllMocks();
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);

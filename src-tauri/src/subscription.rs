@@ -147,12 +147,16 @@ pub fn resolve_data_dir(data_dir: &str) -> Result<std::path::PathBuf, String> {
 struct StatePersistence {
     generation: u64,
     sessions: HashMap<String, u64>,
+    restoring: bool,
 }
 
 // 同目录读/保存/备份/恢复共享边界；恢复成功后所有旧会话永久失去写权限。
 type StatePersistenceRegistry = Mutex<HashMap<PathBuf, Arc<Mutex<StatePersistence>>>>;
 static STATE_PERSISTENCE: OnceLock<StatePersistenceRegistry> = OnceLock::new();
 fn state_persistence(dir: &Path) -> Result<Arc<Mutex<StatePersistence>>, String> {
+    if crate::complete_restore_state::pending(dir)? {
+        return Err("完整备份恢复尚未结束，请重启应用完成恢复后再读写状态".into());
+    }
     let key = dir.canonicalize().map_err(|e| format!("解析状态目录失败：{e}"))?;
     let mut states = STATE_PERSISTENCE.get_or_init(|| Mutex::new(HashMap::new()))
         .lock().map_err(|_| "状态目录锁不可用")?;
@@ -167,12 +171,19 @@ pub fn save_app_state(content: String, data_dir: String, session: Option<String>
     let dir = resolve_data_dir(&data_dir)?;
     let persistence = state_persistence(&dir)?;
     let state = persistence.lock().map_err(|_| "状态事务锁不可用")?;
+    if state.restoring { return Err("正在恢复完整备份，状态保存暂时暂停".into()); }
     let allowed = match session {
         Some(session) => state.sessions.get(&session) == Some(&state.generation),
         None => state.generation == 0, // 兼容首次水合前的旧调用；恢复后必须取得新会话。
     };
     if !allowed { return Err("状态已经恢复，旧保存已忽略，请重新加载".into()); }
-    crate::backup_state::replace(&dir.join("state.json"), content.as_bytes())
+    crate::backup_state::replace(&dir.join("state.json"), content.as_bytes())?;
+    drop(state);
+    #[cfg(target_os = "android")]
+    if let Err(error) = crate::android::resources::schedule_saved() {
+        eprintln!("设置已保存，但 Geo 后台任务尚未更新：{error}");
+    }
+    Ok(())
 }
 
 /// 读取 state.json。没有则返回 None（首次启动）。
@@ -181,6 +192,7 @@ pub fn load_app_state(data_dir: String, session: Option<String>) -> Result<Optio
     let dir = resolve_data_dir(&data_dir)?;
     let persistence = state_persistence(&dir)?;
     let mut state = persistence.lock().map_err(|_| "状态事务锁不可用")?;
+    if state.restoring && session.is_some() { return Err("正在恢复完整备份，请稍后重新加载".into()); }
     if let Some(session) = session {
         let generation = state.generation;
         if *state.sessions.entry(session).or_insert(generation) != generation {
@@ -379,8 +391,72 @@ pub(crate) fn portable_state_bytes(dir: &Path) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn restore_portable(dir: &Path, incoming: &[u8], session: &str) -> Result<(), String> {
+    begin_portable_restore(dir, incoming, session)?.commit()
+}
+
+/// 跨应用状态与服务数据的恢复预约；不跨 await 持有标准互斥锁。
+/// 预约期间拒绝所有状态写入，Drop 在任何失败路径上解除预约。
+pub(crate) struct PortableRestoreGuard {
+    persistence: Arc<Mutex<StatePersistence>>,
+    target: PathBuf,
+    merged: Vec<u8>,
+    previous: Vec<u8>,
+    generation: u64,
+    finished: bool,
+    previous_exists: bool,
+    original_generation: u64,
+}
+
+impl PortableRestoreGuard {
+    pub(crate) fn previous(&self) -> &[u8] { &self.previous }
+    pub(crate) fn previous_exists(&self) -> bool { self.previous_exists }
+    pub(crate) fn publish(&mut self) -> Result<(), String> {
+        let mut state = self.persistence.lock().map_err(|_| "状态事务锁不可用")?;
+        if !state.restoring || state.generation != self.generation { return Err("恢复预约已失效".into()); }
+        crate::backup_state::replace(&self.target, &self.merged)?;
+        state.generation += 1;
+        self.generation = state.generation;
+        Ok(())
+    }
+    pub(crate) fn rollback(&mut self) -> Result<(), String> {
+        if self.previous_exists {
+            crate::backup_state::replace(&self.target, &self.previous)?;
+        } else if self.target.exists() {
+            std::fs::remove_file(&self.target).map_err(|e| format!("回滚状态失败：{e}"))?;
+        }
+        let mut state = self.persistence.lock().map_err(|_| "状态事务锁不可用")?;
+        if state.generation == self.generation {
+            state.generation = self.original_generation;
+            self.generation = self.original_generation;
+        }
+        Ok(())
+    }
+    pub(crate) fn finish(mut self) -> Result<(), String> {
+        let mut state = self.persistence.lock().map_err(|_| "状态事务锁不可用")?;
+        state.restoring = false;
+        self.finished = true;
+        drop(state);
+        #[cfg(target_os = "android")]
+        if let Err(error) = crate::android::resources::schedule_saved() {
+            eprintln!("备份已恢复，但 Geo 后台任务尚未更新：{error}");
+        }
+        Ok(())
+    }
+    pub(crate) fn commit(mut self) -> Result<(), String> { self.publish()?; self.finish() }
+}
+
+impl Drop for PortableRestoreGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            if let Ok(mut state) = self.persistence.lock() { state.restoring = false; }
+        }
+    }
+}
+
+pub(crate) fn begin_portable_restore(dir: &Path, incoming: &[u8], session: &str) -> Result<PortableRestoreGuard, String> {
     let persistence = state_persistence(dir)?;
     let mut state = persistence.lock().map_err(|_| "状态事务锁不可用")?;
+    if state.restoring { return Err("已有备份正在恢复".into()); }
     if state.sessions.get(session) != Some(&state.generation) { return Err("状态会话已变更，请重新打开备份".into()); }
     let target = dir.join("state.json");
     let previous = match std::fs::symlink_metadata(&target) {
@@ -389,13 +465,16 @@ pub(crate) fn restore_portable(dir: &Path, incoming: &[u8], session: &str) -> Re
         Err(e) => return Err(format!("读取本机状态失败：{e}")),
     };
     let merged = crate::portable_backup::merge(previous.as_deref().unwrap_or(br#"{"profiles":[]}"#), incoming)?;
-    if let Some(previous) = previous {
+    if let Some(previous) = &previous {
         let backups = backups_dir(dir.to_str().ok_or("无效状态目录")?)?;
-        crate::backup_state::snapshot(&backups, "state-before-", &previous)?;
+        crate::backup_state::snapshot(&backups, "state-before-", previous)?;
     }
-    crate::backup_state::replace(&target, &merged)?;
-    state.generation += 1;
-    Ok(())
+    let generation = state.generation;
+    let previous_exists = previous.is_some();
+    state.restoring = true;
+    drop(state);
+    Ok(PortableRestoreGuard { persistence, target, merged,
+        previous: previous.unwrap_or_else(|| br#"{"profiles":[]}"#.to_vec()), generation, original_generation: generation, finished: false, previous_exists })
 }
 
 /// 列出已有备份（新的在前）。
@@ -440,6 +519,7 @@ pub fn restore_backup(data_dir: String, name: String) -> Result<(), String> {
     let dir = resolve_data_dir(&data_dir)?;
     let persistence = state_persistence(&dir)?;
     let mut state = persistence.lock().map_err(|_| "状态事务锁不可用")?;
+    if state.restoring { return Err("已有备份正在恢复".into()); }
     if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) || !name.ends_with(".json") || name.contains("..") {
         return Err("非法备份名".to_string());
     }
@@ -457,6 +537,11 @@ pub fn restore_backup(data_dir: String, name: String) -> Result<(), String> {
     }
     crate::backup_state::replace(&target, &bytes)?;
     state.generation += 1;
+    drop(state);
+    #[cfg(target_os = "android")]
+    if let Err(error) = crate::android::resources::schedule_saved() {
+        eprintln!("备份已恢复，但 Geo 后台任务尚未更新：{error}");
+    }
     Ok(())
 }
 
@@ -667,6 +752,36 @@ mod backup_restore_tests {
 
     fn restore(dir: &Path) -> Result<(), String> {
         restore_backup(dir.to_string_lossy().into(), "state-input.json".into())
+    }
+
+    #[test]
+    fn portable_restore_reservation_blocks_writes_and_drop_preserves_previous_state() {
+        let dir = fixture(LEGACY);
+        let path = dir.path().to_string_lossy().into_owned();
+        load_app_state(path.clone(), Some("session".into())).unwrap();
+        let incoming = crate::portable_backup::export(LEGACY, "Desktop").unwrap();
+        let guard = begin_portable_restore(dir.path(), &incoming, "session").unwrap();
+        assert_eq!(guard.previous(), CURRENT);
+        assert!(save_app_state(String::from_utf8(LEGACY.to_vec()).unwrap(), path.clone(), Some("session".into())).is_err());
+        assert!(restore(dir.path()).is_err());
+        assert!(load_app_state(path.clone(), Some("new-session".into())).is_err());
+        assert_eq!(std::fs::read(dir.path().join("state.json")).unwrap(), CURRENT);
+        drop(guard);
+        save_app_state(String::from_utf8(CURRENT.to_vec()).unwrap(), path.clone(), Some("session".into())).unwrap();
+        begin_portable_restore(dir.path(), &incoming, "session").unwrap().commit().unwrap();
+        assert!(save_app_state(String::from_utf8(CURRENT.to_vec()).unwrap(), path, Some("session".into())).is_err());
+    }
+
+    #[test]
+    fn portable_restore_refuses_missing_local_snapshot_before_reservation() {
+        let dir = fixture(LEGACY);
+        load_app_state(dir.path().to_string_lossy().into_owned(), Some("session".into())).unwrap();
+        std::fs::remove_dir_all(dir.path().join("backups")).unwrap();
+        std::fs::write(dir.path().join("backups"), b"not a directory").unwrap();
+        let incoming = crate::portable_backup::export(LEGACY, "Desktop").unwrap();
+        assert!(begin_portable_restore(dir.path(), &incoming, "session").is_err());
+        assert_eq!(std::fs::read(dir.path().join("state.json")).unwrap(), CURRENT);
+        assert!(!state_persistence(dir.path()).unwrap().lock().unwrap().restoring);
     }
 
     #[test]

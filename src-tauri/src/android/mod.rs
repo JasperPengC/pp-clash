@@ -6,6 +6,8 @@ use crate::{mihomo, platform, subscription, traffic};
 
 pub(crate) mod kernel;
 mod update;
+pub(crate) mod cloud_tools;
+pub(crate) mod resources;
 
 struct Vpn(PluginHandle<Wry>);
 
@@ -48,7 +50,14 @@ pub fn run() {
         .manage(kernel::KernelState::default())
         .manage(update::UpdateDownload::default())
         .setup(|app| {
-            platform::set_android_data_dir(app.path().app_data_dir()?);
+            let base = app.path().app_data_dir()?;
+            app.state::<Vpn>().0.run_mobile_plugin::<serde_json::Value>("initializeCloudTools", json!({"base": base}))?;
+            platform::set_android_data_dir(base);
+            // JNI initialization recovers once per process, including a WorkManager cold start.
+            if let Err(error) = resources::schedule_saved() {
+                eprintln!("Geo 后台任务尚未注册，请在资源页检查设置：{error}");
+            }
+            crate::webdav_commands::start_scheduler(app.handle().clone());
             tauri::async_runtime::spawn(traffic::run(app.handle().clone()));
             Ok(())
         })
@@ -76,6 +85,28 @@ pub fn run() {
             crate::webdav_commands::webdav_upload,
             crate::webdav_commands::webdav_preview,
             crate::webdav_commands::webdav_restore,
+            crate::webdav_commands::get_webdav_settings,
+            crate::webdav_commands::save_webdav_settings,
+            crate::webdav_commands::test_webdav_connection,
+            crate::webdav_commands::webdav_backup_status,
+            crate::webdav_commands::webdav_backup_now,
+            crate::webdav_commands::webdav_backup_history,
+            crate::webdav_commands::webdav_backup_delete,
+            crate::webdav_commands::webdav_saved_preview,
+            crate::webdav_commands::webdav_saved_restore,
+            crate::sub_store_commands::sub_store_status,
+            crate::sub_store_commands::sub_store_start,
+            crate::sub_store_commands::sub_store_stop,
+            crate::sub_store_commands::sub_store_request,
+            crate::sub_store_commands::sub_store_preview_prepare,
+            crate::sub_store_commands::sub_store_preview,
+            crate::sub_store_commands::sub_store_preview_cancel,
+            crate::sub_store_commands::sub_store_snapshot,
+            crate::sub_store_commands::sub_store_restore_snapshot,
+            resources::list_resource_files,
+            resources::geo_auto_update_status,
+            resources::download_geo_resource,
+            resources::reinstall_bundled_resources,
             kernel::validate_config,
             kernel::start_kernel,
             kernel::stop_kernel,

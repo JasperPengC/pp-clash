@@ -31,6 +31,30 @@ install() {
   npm ci
 }
 
+prepare_service_engine() {
+  log "校验固定版本的 Sub-Store 构建工具链并重建引擎"
+  node scripts/check-version.mjs
+  scan
+  npm ci --ignore-scripts --prefix scripts/sub-store/toolchain
+  node scripts/sub-store/build.cjs
+}
+
+check_workflows() {
+  log "GitHub Actions 工作流校验"
+  if [ -n "${ACTIONLINT:-}" ]; then
+    "$ACTIONLINT" -shellcheck='' .github/workflows/*.yml
+  else
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck='' .github/workflows/*.yml
+  fi
+}
+
+preflight() {
+  node scripts/check-version.mjs
+  scan
+  check_workflows
+  check_resources
+}
+
 build_web() {
   log "前端生产构建"
   npm run build
@@ -60,7 +84,7 @@ check_rust() {
 check_resources() {
   log "资源门禁离线 fixture"
   local py
-  py="$(command -v python || command -v python3)"
+  py="${PYTHON:-$(command -v python || command -v python3)}"
   "$py" -m unittest discover -s scripts/tests -v
   if command -v pwsh >/dev/null 2>&1; then
     pwsh -NoProfile -NonInteractive -File scripts/tests/test-windows-scripts.ps1
@@ -76,9 +100,15 @@ validate_release_resources() {
   local digest="$2"
   local arch="${3:-x86_64}"
   local py
-  py="$(command -v python || command -v python3)"
+  py="${PYTHON:-$(command -v python || command -v python3)}"
   [ -n "$digest" ] || { echo "必须单独配置受信任的资源 ZIP SHA-256" >&2; return 1; }
   "$py" scripts/validate-resources.py "$KERNEL_ZIP" "$os" "$arch" --sha256 "$digest"
+}
+
+validate_release_service() {
+  local py
+  py="${PYTHON:-$(command -v python || command -v python3)}"
+  "$py" scripts/validate-sub-store-resources.py src-tauri/resources/sub-store "$2" --platform "$1"
 }
 
 check() {
@@ -161,6 +191,7 @@ build_windows_release() {
   local target="${RELEASE_TARGET:-x86_64-pc-windows-msvc}"
   release_target windows "$target"
   validate_release_resources windows "${KERNEL_ZIP_SHA256:-${KERNEL_ZIP_SHA256_WINDOWS:-}}" "$RESOURCE_ARCH"
+  validate_release_service windows "$RESOURCE_ARCH"
   install
   log "Windows $RESOURCE_ARCH NSIS（内置同架构内核）"
   npm run tauri -- build --target "$target" --bundles nsis
@@ -171,9 +202,15 @@ build_linux_release() {
   local target="${RELEASE_TARGET:-x86_64-unknown-linux-gnu}"
   release_target linux "$target"
   validate_release_resources linux "${KERNEL_ZIP_SHA256:-}" "$RESOURCE_ARCH"
+  validate_release_service linux "$RESOURCE_ARCH"
   install
   log "Linux $RESOURCE_ARCH（deb / rpm / AppImage，内置同架构内核）"
-  npm run tauri -- build --target "$target" --bundles deb,rpm,appimage
+  # linuxdeploy 会 strip 并改写 AppDir 中所有 ELF，包括已锁定摘要的 Node。
+  # 应用与依赖仍正常设 RPATH；独立 Node 保留官方字节并使用系统动态库。
+  local real_patchelf
+  real_patchelf="$(command -v patchelf)"
+  PPCLASH_REAL_PATCHELF="$real_patchelf" PATCHELF="$ROOT/scripts/linux-runtime-patchelf.sh" NO_STRIP=1 \
+    npm run tauri -- build --target "$target" --bundles deb,rpm,appimage
   local version dir ext dest
   version="$(node -p "require('./package.json').version")"
   for ext in deb rpm AppImage; do
@@ -192,6 +229,9 @@ scan() {
 
 case "${1:-check}" in
   install) install ;;
+  prepare-service-engine) prepare_service_engine ;;
+  check-workflows) check_workflows ;;
+  preflight) preflight ;;
   build-web) build_web ;;
   check-web) check_web ;;
   check-rust) check_rust ;;
@@ -205,7 +245,7 @@ case "${1:-check}" in
   normalize-windows-installer) normalize_windows_installer ;;
   scan) scan ;;
   *)
-    echo "用法: $0 {install|build-web|check-web|check-rust|check-resources|check|build-macos|build-macos-release|build-windows|build-windows-release|normalize-windows-installer|build-linux-release|scan}" >&2
+    echo "用法: $0 {preflight|prepare-service-engine|check-workflows|install|build-web|check-web|check-rust|check-resources|check|build-macos|build-macos-release|build-windows|build-windows-release|normalize-windows-installer|build-linux-release|scan}" >&2
     exit 2
     ;;
 esac

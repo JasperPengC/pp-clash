@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { usePageQuery, useViewPreference } from '../store/view-preferences';
 import { EmptyState, Pill, ReadError, Segmented, Spinner, Toggle } from '../components/ui';
 import {
   IconFolder,
@@ -6,6 +7,7 @@ import {
   IconSearch,
 } from '../components/icons';
 import { api } from '../core/api';
+import { isAndroid } from '../core/platform';
 import { formatTime } from '../core/format';
 import { getLifecycleToken, isLifecycleCurrent, useApp } from '../store/app';
 
@@ -13,6 +15,7 @@ interface ResourceFile {
   name: string;
   size: number;
   exists: boolean;
+  aliasOf?: string;
 }
 
 interface Provider {
@@ -148,9 +151,11 @@ export function ResourcesPage() {
   const [reinstallConfirm, setReinstallConfirm] = useState(false);
   const [updating, setUpdating] = useState<string | null>(null);
   const [geoUpdating, setGeoUpdating] = useState<string | null>(null);
+  const [geoSchedule, setGeoSchedule] = useState<Awaited<ReturnType<typeof api.geoAutoUpdateStatus>> | null>(null);
+  const [geoScheduleError, setGeoScheduleError] = useState('');
   const [urlDrafts, setUrlDrafts] = useState(settings.geoUrls);
-  const [tab, setTab] = useState<Tab>('geo');
-  const [query, setQuery] = useState('');
+  const [tab, setTab] = useViewPreference('resourceTab');
+  const [query, setQuery] = usePageQuery('resources');
 
   const load = (): Promise<boolean> => {
     if (loadPending.current) return loadPending.current;
@@ -196,6 +201,17 @@ export function ResourcesPage() {
   };
 
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => {
+    if (!isAndroid) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try { const value = await api.geoAutoUpdateStatus(); if (!cancelled) { setGeoSchedule(value ?? null); setGeoScheduleError(''); } }
+      catch (error) { if (!cancelled) setGeoScheduleError(String(error)); }
+    };
+    void refresh();
+    const timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') void refresh(); }, 15000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [settings.geoAutoUpdate, settings.geoUpdateInterval]);
   useEffect(() => {
     let cancelled = false;
     if (loadPending.current) void loadPending.current.then(() => { if (!cancelled) void load(); });
@@ -322,13 +338,13 @@ export function ResourcesPage() {
           <button type="button" className="icon-btn" title="刷新资源" aria-label="刷新资源" aria-busy={loading} disabled={loading || operationBusy} onClick={() => void load()}>
             {loading ? <Spinner small /> : <IconRefresh size={15} />}
           </button>
-          <button
+          {!isAndroid && <button
             type="button"
             className="icon-btn" aria-label="打开资源目录" title="打开资源目录"
             onClick={() => void api.openDataDir('PPClash').catch(error => notify('error', `打开目录失败：${String(error)}`))}
           >
             <IconFolder size={15} />
-          </button>
+          </button>}
         </div>
       </header>
 
@@ -404,6 +420,7 @@ export function ResourcesPage() {
                       <div className="geo-source-status">
                         <span className="geo-source-size">
                           {file ? formatSize(file.size) : '—'}
+                          {isAndroid && file?.aliasOf === 'geoip.metadb' && <small>与 MetaDB 共用当前数据库</small>}
                         </span>
                         <Pill tone={!loaded.files || errors.files ? undefined : file?.exists ? 'ok' : 'warn'}>
                           {!loaded.files ? loading ? '读取中' : '未知' : errors.files ? '待确认' : file?.exists ? '已下载' : '未下载'}
@@ -475,6 +492,11 @@ export function ResourcesPage() {
                 )}
                 </div>
               </div>
+              {isAndroid && <p className="resource-usage-note" role={geoScheduleError || geoSchedule?.error ? 'alert' : 'status'}>
+                {geoScheduleError || geoSchedule?.error || (geoSchedule?.enabled
+                  ? `联网后由系统安排更新${geoSchedule.nextDueAt ? ` · 下次计划 ${formatTime(geoSchedule.nextDueAt)}` : ''}，重启内核后生效`
+                  : geoSchedule ? '自动更新已关闭' : '正在读取自动更新计划…')}
+              </p>}
               <p className="resource-usage-note">db 使用 MetaDB / MMDB，dat 使用 GeoIP.dat；GeoSite、ASN 独立按需加载，已下载不代表正在使用。</p>
 
             </section>

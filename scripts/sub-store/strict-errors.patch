@@ -1,0 +1,1224 @@
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -19,6 +19,7 @@
+   "license": "AGPL-3.0",
+   "dependencies": {
+     "@maxmind/geoip2-node": "^5.0.0",
++    "acorn": "8.19.0",
+     "age-encryption": "^0.3.0",
+     "body-parser": "^1.20.9",
+     "buffer": "^6.0.3",
+@@ -58,4 +59,4 @@
+     "peggy": "^2.0.1",
+     "prettier": "2.6.2"
+   }
+-}
+\ No newline at end of file
++}
+--- a/backend/pnpm-lock.yaml
++++ b/backend/pnpm-lock.yaml
+@@ -20,6 +20,9 @@
+       '@maxmind/geoip2-node':
+         specifier: ^5.0.0
+         version: 5.0.0
++      acorn:
++        specifier: 8.19.0
++        version: 8.19.0
+       age-encryption:
+         specifier: ^0.3.0
+         version: 0.3.0
+--- a/backend/src/core/proxy-utils/index.js
++++ b/backend/src/core/proxy-utils/index.js
+@@ -24,6 +24,8 @@
+     isResponseTransformerType,
+ } from './processors';
+ import PROXY_PREPROCESSORS from './preprocessors';
++import { ProcessorError, processorScope } from './processor-error';
++import { processorStep, processorTime, processorDuration } from './processor-trace';
+ import PROXY_PRODUCERS from './producers';
+ import PROXY_PARSERS from './parsers';
+ import $ from '@/core/app';
+@@ -146,14 +148,24 @@
+     executionContext = {},
+ ) {
+     let context = {};
++    const scope = processorScope(executionContext);
++    const trace = executionContext.processorTrace;
++    const chain = trace?.enter(scope);
++    // Scripts may inspect or change their execution context, but must not hold
++    // references to the live subscription/collection objects in the store.
++    if (source != null) source = JSON.parse(JSON.stringify(source));
++    operators = JSON.parse(JSON.stringify(operators));
+     if (raw !== undefined) {
+         context.raw =
+             Array.isArray(raw) || (raw !== null && typeof raw === 'object')
+                 ? raw
+                 : [raw];
+     }
+-    for (const item of operators) {
++    for (const [index, item] of operators.entries()) {
++        // The private operators copy is never exposed to script context.
++        const step = processorStep(item, index);
+         if (isResponseTransformerType(item.type)) {
++            trace?.record(chain, { ...step, status: 'skipped', skipReason: 'response-transformer' });
+             $.log(
+                 `Skipping response transformer during proxy/file processing: "${
+                     item.type
+@@ -164,6 +176,7 @@
+             continue;
+         }
+         if (shouldSkipByContext(item, context)) {
++            trace?.record(chain, { ...step, status: 'skipped', skipReason: 'context' });
+             $.info(
+                 `Skipping context-controlled operator: "${
+                     item.type
+@@ -172,6 +185,7 @@
+             continue;
+         }
+         if (item.disabled) {
++            trace?.record(chain, { ...step, status: 'skipped', skipReason: 'disabled' });
+             $.log(
+                 `Skipping disabled operator: "${
+                     item.type
+@@ -181,6 +195,12 @@
+             );
+             continue;
+         }
++        const started = processorTime();
++        const input = Array.isArray(proxies) ? { inputCount: proxies.length } : {};
++        try {
++        if (!Object.prototype.hasOwnProperty.call(PROXY_PROCESSORS, item.type)) {
++            throw new ProcessorError(`Unknown processor: "${item.type}"`);
++        }
+         // process script
+         let script;
+         let $arguments = {};
+@@ -191,11 +211,6 @@
+             ));
+         }
+ 
+-        if (!PROXY_PROCESSORS[item.type]) {
+-            $.error(`Unknown operator: "${item.type}"`);
+-            continue;
+-        }
+-
+         $.log(
+             `Applying "${item.type}" with arguments:\n >>> ${
+                 JSON.stringify(item.args, null, 2) || 'None'
+@@ -210,6 +225,7 @@
+                 source,
+                 $options,
+                 context,
++                executionContext,
+             );
+         } else {
+             processor = PROXY_PROCESSORS[item.type](
+@@ -218,6 +234,25 @@
+             );
+         }
+         proxies = await ApplyProcessor(processor, proxies);
++        trace?.record(chain, {
++            ...step, status: 'success', durationMs: processorDuration(started), ...input,
++            ...(Array.isArray(proxies) ? { outputCount: proxies.length } : {}),
++        });
++        } catch (error) {
++            trace?.record(chain, { ...step, status: 'failed', durationMs: processorDuration(started), ...input });
++            if (trace) {
++                for (let next = index + 1; next < operators.length; next++) {
++                    trace.record(chain, { ...processorStep(operators[next], next), status: 'not-run' });
++                }
++            }
++            const failure = error instanceof ProcessorError
++                ? error
++                : new ProcessorError(`Cannot apply ${item.type}: ${error.message || error}`, error);
++            if (!failure.processor && scope) {
++                failure.processor = { ...step, scope };
++            }
++            throw failure;
++        }
+     }
+     return proxies;
+ }
+@@ -286,7 +321,7 @@
+         const message =
+             'Node.js 环境下，脚本操作、脚本过滤和修改响应必须设置 SUB_STORE_FRONTEND_BACKEND_PATH 才能生效；若不想改变当前 path，可设置 SUB_STORE_FRONTEND_BACKEND_PATH=/';
+         $.error(message);
+-        throw new Error(message);
++        throw new ProcessorError(message);
+     }
+ 
+     let script;
+@@ -344,13 +379,14 @@
+                         type: 'file',
+                         name,
+                         noFlow: executionContext.noFlow,
++                        processorTrace: executionContext.processorTrace,
+                     });
+                 }
+             } catch (err) {
+                 $.error(
+                     `Error when loading ${type}: ${item.args.content}.\n Reason: ${err}`,
+                 );
+-                throw new Error(`无法加载 ${type}: ${url}`);
++                throw new ProcessorError(`无法加载 ${type}: ${url}. Reason: ${err.message || err}`, err);
+             }
+         } else if (url?.startsWith('/')) {
+             try {
+@@ -361,7 +397,7 @@
+                 $.error(
+                     `Error when reading local script: ${item.args.content}.\n Reason: ${err}`,
+                 );
+-                throw new Error(`无法从该路径读取脚本文件: ${url}`);
++                throw new ProcessorError(`无法从该路径读取脚本文件: ${url}. Reason: ${err.message || err}`, err);
+             }
+         } else {
+             // if this is a remote script, download it
+@@ -382,7 +418,7 @@
+                 $.error(
+                     `Error when downloading remote script: ${item.args.content}.\n Reason: ${err}`,
+                 );
+-                throw new Error(`无法下载脚本: ${url}`);
++                throw new ProcessorError(`无法下载脚本: ${url}. Reason: ${err.message || err}`, err);
+             }
+         }
+     } else {
+--- a/backend/src/core/proxy-utils/processor-error.js
++++ b/backend/src/core/proxy-utils/processor-error.js
+@@ -0,0 +1,25 @@
++// Processing failures must not be converted into remote-source fallbacks.
++export class ProcessorError extends Error {
++    constructor(message, cause) {
++        super(message);
++        this.name = 'ProcessorError';
++        this.code = 'PROCESSOR_FAILED';
++        this.cause = cause;
++        if (cause instanceof ProcessorError && cause.processor) {
++            this.processor = cause.processor;
++        }
++    }
++}
++
++export function isProcessorError(error) {
++    return error instanceof ProcessorError;
++}
++
++// The caller owns the kind; user names and unknown fields are not discriminators.
++export function processorScope(executionContext) {
++    const scope = executionContext?.processorScope;
++    if (scope && ['sub', 'collection', 'file'].includes(scope.kind) &&
++        typeof scope.name === 'string') {
++        return { kind: scope.kind, name: scope.name };
++    }
++}
+--- a/backend/src/core/proxy-utils/processor-trace.js
++++ b/backend/src/core/proxy-utils/processor-trace.js
+@@ -0,0 +1,99 @@
++// A preview owns one collector; only callers explicitly carrying it can record.
++// Keep identities intact. Bounds apply while collecting, including concurrent chains.
++const MAX_STEPS = 200;
++const MAX_CHARACTERS = 8000;
++
++export function createProcessorTrace() {
++    const trace = { version: 1, chains: [], truncated: false };
++    const size = () => JSON.stringify(trace).length;
++    const count = () => trace.chains.reduce((sum, chain) => sum + chain.steps.length, 0);
++    const fits = () => count() <= MAX_STEPS && size() <= MAX_CHARACTERS;
++    const oversized = (scope, step) =>
++        scope.name.length + (step?.type?.length || 0) + (step?.name?.length || 0) > MAX_CHARACTERS;
++
++    function removeOrdinaryStep(preferredChain) {
++        for (let i = trace.chains.length - 1; i >= 0; i--) {
++            const chain = trace.chains[i];
++            for (let j = chain.steps.length - 1; j >= 0; j--) {
++                if (chain.steps[j].status !== 'failed') {
++                    chain.steps.splice(j, 1);
++                    return true;
++                }
++            }
++            if (chain !== preferredChain && chain.steps.length === 0) {
++                trace.chains.splice(i, 1);
++                return true;
++            }
++        }
++        return false;
++    }
++
++    return {
++        enter(scope) {
++            if (!scope) return;
++            const chain = { scope: { ...scope }, steps: [] };
++            if (oversized(scope)) {
++                trace.truncated = true;
++                return chain;
++            }
++            trace.chains.push(chain);
++            if (!fits()) {
++                trace.chains.pop();
++                trace.truncated = true;
++            }
++            return chain;
++        },
++        record(chain, step) {
++            if (!chain) return;
++            if (typeof step.type !== 'string' || oversized(chain.scope, step)) {
++                trace.truncated = true;
++                return;
++            }
++            const attached = trace.chains.includes(chain);
++            if (!attached) {
++                if (step.status !== 'failed') {
++                    trace.truncated = true;
++                    return;
++                }
++                trace.chains.push(chain);
++            }
++            chain.steps.push(step);
++            if (!fits()) {
++                trace.truncated = true;
++                if (step.status === 'failed') {
++                    while (!fits() && removeOrdinaryStep(chain)) { /* retain failures first */ }
++                }
++                if (!fits()) {
++                    chain.steps.splice(chain.steps.indexOf(step), 1);
++                    if (!attached && chain.steps.length === 0) {
++                        trace.chains.splice(trace.chains.indexOf(chain), 1);
++                    }
++                }
++            }
++        },
++        snapshot() {
++            return JSON.parse(JSON.stringify(trace));
++        },
++    };
++}
++
++export function processorStep(item, index) {
++    return {
++        index,
++        type: item.type,
++        ...(typeof item.customName === 'string' && item.customName
++            ? { name: item.customName }
++            : {}),
++    };
++}
++
++export function processorTime() {
++    return typeof performance !== 'undefined' && typeof performance.now === 'function'
++        ? performance.now()
++        : Date.now();
++}
++
++export function processorDuration(start) {
++    const elapsed = processorTime() - start;
++    return Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
++}
+--- a/backend/src/core/proxy-utils/processors/index.js
++++ b/backend/src/core/proxy-utils/processors/index.js
+@@ -12,6 +12,8 @@
+ import { isMihomoConfigFile } from '@/utils/file-type';
+ import { SETTINGS_KEY } from '@/constants';
+ import YAML from '@/utils/yaml';
++import { ProcessorError } from '../processor-error';
++import { hasScriptEntryPoint } from './script-mode';
+ 
+ import env from '@/utils/env';
+ import {
+@@ -428,10 +430,11 @@
+     source,
+     $options,
+     context,
++    executionContext = {},
+ ) {
+     context.source = source;
+     context.env = env;
+-    return {
++    const processor = {
+         name: 'Script Operator',
+         func: async (proxies) => {
+             let output = proxies;
+@@ -457,12 +460,16 @@
+                     // console.log(e);
+                 }
+             }
++            if (!hasScriptEntryPoint(script, 'operator')) {
++                return processor.nodeFunc(proxies);
++            }
+             await (async function () {
+                 const operator = createDynamicFunction(
+                     'operator',
+                     script,
+                     $arguments,
+                     $options,
++                    executionContext,
+                 );
+                 output = operator(proxies, targetPlatform, context);
+             })();
+@@ -505,12 +512,14 @@
+                       }`,
+                     $arguments,
+                     $options,
++                    executionContext,
+                 );
+                 output = operator(proxies, targetPlatform, context);
+             })();
+             return output;
+         },
+     };
++    return processor;
+ }
+ 
+ const ADD_PROXIES_FROM_SUBSCRIPTION_OPERATOR =
+@@ -551,6 +560,7 @@
+                 'include-unsupported-proxy': includeUnsupportedProxy,
+             },
+             noFlow: executionContext.noFlow,
++            processorTrace: executionContext.processorTrace,
+         });
+ 
+         switch (position) {
+@@ -1490,12 +1500,16 @@
+     source,
+     $options,
+     context,
++    executionContext = {},
+ ) {
+     context.source = source;
+     context.env = env;
+-    return {
++    const processor = {
+         name: 'Script Filter',
+         func: async (proxies) => {
++            if (!hasScriptEntryPoint(script, 'filter')) {
++                return processor.nodeFunc(proxies);
++            }
+             let output = FULL(proxies.length, true);
+             await (async function () {
+                 const filter = createDynamicFunction(
+@@ -1503,6 +1517,7 @@
+                     script,
+                     $arguments,
+                     $options,
++                    executionContext,
+                 );
+                 output = filter(proxies, targetPlatform, context);
+             })();
+@@ -1526,12 +1541,14 @@
+                       }`,
+                     $arguments,
+                     $options,
++                    executionContext,
+                 );
+                 output = filter(proxies, targetPlatform, context);
+             })();
+             return output;
+         },
+     };
++    return processor;
+ }
+ 
+ function ResponseTransformer(
+@@ -1637,82 +1654,28 @@
+ }
+ 
+ async function ApplyFilter(filter, objs) {
+-    // select proxies
+-    let selected = FULL(objs.length, true);
+     try {
+-        selected = await filter.func(objs);
+-    } catch (err) {
+-        let funcErr = '';
+-        let funcErrMsg = `${err.message ?? err}`;
+-        if (funcErrMsg.includes('$server is not defined')) {
+-            funcErr = '';
+-        } else {
+-            $.error(
+-                `Cannot apply filter ${filter.name}(function filter)! Reason: ${err}`,
+-            );
+-            funcErr = `执行 function filter 失败 ${funcErrMsg}; `;
+-        }
+-        try {
+-            selected = await filter.nodeFunc(objs);
+-        } catch (err) {
+-            $.error(
+-                `Cannot apply filter ${filter.name}(shortcut script)! Reason: ${err}`,
+-            );
+-            let nodeErr = '';
+-            let nodeErrMsg = `${err.message ?? err}`;
+-            if (funcErr && nodeErrMsg === funcErrMsg) {
+-                nodeErr = '';
+-                funcErr = `执行失败 ${funcErrMsg}`;
+-            } else {
+-                nodeErr = `执行快捷过滤脚本 失败 ${nodeErrMsg}`;
+-            }
+-            throw new Error(`脚本过滤 ${funcErr}${nodeErr}`);
+-        }
++        const selected = await filter.func(objs);
++        return objs.filter((_, i) => selected[i]);
++    } catch (error) {
++        throw new ProcessorError(
++            `Cannot apply ${filter.name}: ${error?.message ?? error}`,
++            error,
++        );
+     }
+-    return objs.filter((_, i) => selected[i]);
+ }
+ 
+ async function ApplyOperator(operator, objs) {
+-    let output = clone(objs);
++    const output = clone(objs);
+     try {
+-        const output_ = await operator.func(output);
+-        if (output_) output = output_;
+-    } catch (err) {
+-        let funcErr = '';
+-        let funcErrMsg = `${err.message ?? err}`;
+-        if (
+-            funcErrMsg.includes('$server is not defined') ||
+-            funcErrMsg.includes('$content is not defined') ||
+-            funcErrMsg.includes('$files is not defined') ||
+-            output?.$files ||
+-            output?.$content
+-        ) {
+-            funcErr = '';
+-        } else {
+-            $.error(
+-                `Cannot apply operator ${operator.name}(function operator)! Reason: ${err}`,
+-            );
+-            funcErr = `执行 function operator 失败 ${funcErrMsg}; `;
+-        }
+-        try {
+-            const output_ = await operator.nodeFunc(output);
+-            if (output_) output = output_;
+-        } catch (err) {
+-            $.error(
+-                `Cannot apply operator ${operator.name}(shortcut script)! Reason: ${err}`,
+-            );
+-            let nodeErr = '';
+-            let nodeErrMsg = `${err.message ?? err}`;
+-            if (funcErr && nodeErrMsg === funcErrMsg) {
+-                nodeErr = '';
+-                funcErr = `执行失败 ${funcErrMsg}`;
+-            } else {
+-                nodeErr = `执行快捷脚本 失败 ${nodeErrMsg}`;
+-            }
+-            throw new Error(`脚本操作 ${funcErr}${nodeErr}`);
+-        }
++        const result = await operator.func(output);
++        return result || output;
++    } catch (error) {
++        throw new ProcessorError(
++            `Cannot apply ${operator.name}: ${error?.message ?? error}`,
++            error,
++        );
+     }
+-    return output;
+ }
+ 
+ export async function ApplyProcessor(processor, objs) {
+@@ -1749,7 +1712,15 @@
+     return JSON.parse(JSON.stringify(object));
+ }
+ 
+-function createDynamicFunction(name, script, $arguments, $options) {
++function createDynamicFunction(name, script, $arguments, $options, executionContext = {}) {
++    // Bind only this execution's collector. Scripts cannot mutate the collector
++    // through their source/context objects, and ordinary calls keep the raw API.
++    const produceInContext = executionContext.processorTrace
++        ? (options) => produceArtifact(options == null ? options : {
++            ...options,
++            processorTrace: executionContext.processorTrace,
++        })
++        : produceArtifact;
+     const flowUtils = {
+         getFlowField,
+         getFlowHeaders,
+@@ -1798,7 +1769,7 @@
+             DOMAIN_RESOLVERS,
+             scriptResourceCache,
+             flowUtils,
+-            produceArtifact,
++            produceInContext,
+             eval(`typeof require !== "undefined"`) ? require : undefined,
+         );
+     } else {
+@@ -1831,7 +1802,7 @@
+             DOMAIN_RESOLVERS,
+             scriptResourceCache,
+             flowUtils,
+-            produceArtifact,
++            produceInContext,
+             eval(`typeof require !== "undefined"`) ? require : undefined,
+         );
+     }
+--- a/backend/src/core/proxy-utils/processors/script-mode.js
++++ b/backend/src/core/proxy-utils/processors/script-mode.js
+@@ -0,0 +1,61 @@
++import { parse } from 'acorn';
++
++function bindsName(pattern, name) {
++    if (!pattern) return false;
++    if (pattern.type === 'Identifier') return pattern.name === name;
++    if (pattern.type === 'RestElement') return bindsName(pattern.argument, name);
++    if (pattern.type === 'AssignmentPattern') return bindsName(pattern.left, name);
++    if (pattern.type === 'ArrayPattern') {
++        return pattern.elements.some((item) => bindsName(item, name));
++    }
++    if (pattern.type === 'ObjectPattern') {
++        return pattern.properties.some((item) =>
++            bindsName(item.type === 'RestElement' ? item.argument : item.value, name),
++        );
++    }
++    return false;
++}
++
++// Decide before executing user code. Comments, strings and exceptions are not
++// evidence of a script mode, and nested functions do not declare its entry point.
++export function hasScriptEntryPoint(script, name) {
++    const ast = parse(script, {
++        ecmaVersion: 'latest',
++        sourceType: 'script',
++        allowReturnOutsideFunction: true,
++        allowAwaitOutsideFunction: true,
++    });
++    const functionTypes = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'ClassDeclaration', 'ClassExpression']);
++    function lexicalBinding(node) {
++        if (!node) return false;
++        if (node.type === 'VariableDeclaration') {
++            return node.kind !== 'var' && node.declarations.some(d => bindsName(d.id, name));
++        }
++        return node.type === 'FunctionDeclaration' && bindsName(node.id, name);
++    }
++    function visit(node, shadowed = false, root = false) {
++        if (!node || typeof node !== 'object') return false;
++        if (Array.isArray(node)) return node.some(item => visit(item, shadowed));
++        if (functionTypes.has(node.type)) return false;
++        if (node.type === 'FunctionDeclaration') return root && bindsName(node.id, name);
++        if (node.type === 'VariableDeclaration') {
++            if ((node.kind === 'var' || root) && node.declarations.some(d => bindsName(d.id, name))) return true;
++        }
++        if (node.type === 'AssignmentExpression' && !shadowed && bindsName(node.left, name)) return true;
++        if (node.type === 'Program') return node.body.some(item => visit(item, false, true));
++        if (node.type === 'BlockStatement' || node.type === 'SwitchStatement') {
++            const body = node.type === 'BlockStatement' ? node.body : node.cases.flatMap(item => item.consequent);
++            const local = shadowed || body.some(lexicalBinding);
++            return body.some(item => visit(item, local));
++        }
++        if (node.type === 'ForStatement' || node.type === 'ForOfStatement' || node.type === 'ForInStatement') {
++            const local = shadowed || lexicalBinding(node.init || node.left);
++            return Object.values(node).some(value => visit(value, local));
++        }
++        if (node.type === 'CatchClause') {
++            return visit(node.body, shadowed || bindsName(node.param, name));
++        }
++        return Object.values(node).some(value => visit(value, shadowed));
++    }
++    return visit(ast);
++}
+--- a/backend/src/restful/ignore-failed-remote-sub.js
++++ b/backend/src/restful/ignore-failed-remote-sub.js
+@@ -1,4 +1,5 @@
+ import { ProxyUtils } from '@/core/proxy-utils';
++import { isProcessorError } from '@/core/proxy-utils/processor-error';
+ 
+ const IGNORE_FAILED_REMOTE_SUB_NOTIFY_MODES = new Set([
+     'enabled',
+@@ -31,7 +32,8 @@
+     );
+ }
+ 
+-function shouldFallbackIgnoreFailedRemoteSub(mode) {
++function shouldFallbackIgnoreFailedRemoteSub(mode, error) {
++    if (isProcessorError(error)) return false;
+     return IGNORE_FAILED_REMOTE_SUB_FALLBACK_MODES.has(
+         normalizeIgnoreFailedRemoteSub(mode),
+     );
+--- a/backend/src/restful/preview.js
++++ b/backend/src/restful/preview.js
+@@ -1,5 +1,7 @@
+ import { InternalServerError } from './errors';
+ import { ProxyUtils } from '@/core/proxy-utils';
++import { ProcessorError, isProcessorError } from '@/core/proxy-utils/processor-error';
++import { createProcessorTrace } from '@/core/proxy-utils/processor-trace';
+ import { findByName } from '@/utils/database';
+ import { success, failed } from './response';
+ import download from '@/utils/download';
+@@ -20,6 +22,30 @@
+ import { maskAgeSecretInUrl } from '@/utils/age';
+ import { isMihomoConfigFile, normalizeFileConfig } from '@/utils/file-type';
+ 
++function previewError(kind, cause, processorTrace) {
++    const details = `Reason: ${cause.message ?? cause}`;
++    const error = new InternalServerError(
++        'INTERNAL_SERVER_ERROR',
++        `Failed to preview ${kind}`,
++        details.length > 1500
++            ? `${details.slice(0, 1500)}…（错误过长，已截断）`
++            : details,
++    );
++    // Native clients bound error transport to 16 KiB; never truncate JSON.
++    // Oversized identities cannot be safely shortened into another entry name.
++    if (isProcessorError(cause) && cause.processor &&
++        JSON.stringify(cause.processor).length <= 4000) {
++        error.processor = cause.processor;
++    }
++    error.trace = processorTrace.snapshot();
++    // JSON escaping can multiply control characters. Reserve the full trace and
++    // processor identity, then trim only human-readable details to fit transport.
++    while (JSON.stringify({ status: 'failed', error }).length > 15500 && error.details.length > 0) {
++        error.details = `${error.details.slice(0, Math.max(0, error.details.length - 100))}…（错误过长，已截断）`;
++    }
++    return error;
++}
++
+ function formatAgeSafeUrls(errors) {
+     return Object.keys(errors).map(maskAgeSecretInUrl).join(', ');
+ }
+@@ -31,16 +57,19 @@
+ }
+ 
+ async function previewFile(req, res) {
++    const processorTrace = createProcessorTrace();
+     try {
+         const file = normalizeFileConfig(req.body);
+         let content = '';
+         if (isMihomoConfigFile(file)) {
+             content = await prepareMihomoProfileContent(file, {
+                 notifyTitle: '🌍 Sub-Store 预览文件失败',
++                processorTrace,
+             });
+         } else {
+             content = await resolveFileRawContent(file, {
+                 notifyTitle: '🌍 Sub-Store 预览文件失败',
++                processorTrace,
+             });
+         }
+         // parse proxies
+@@ -50,33 +79,33 @@
+             .join('\n');
+ 
+         // apply processors
+-        const processed =
+-            Array.isArray(file.process) && file.process.length > 0
+-                ? await ProxyUtils.process(
+-                      { $files: files, $content: filesContent, $file: file },
+-                      file.process,
+-                  )
+-                : { $content: filesContent, $files: files };
++        const processed = await ProxyUtils.process(
++            { $files: files, $content: filesContent, $file: file },
++            Array.isArray(file.process) ? file.process : [],
++            undefined,
++            undefined,
++            undefined,
++            undefined,
++            { processorTrace, processorScope: { kind: 'file', name: file.name } },
++        );
+ 
+         // produce
+         success(res, {
+             original: filesContent,
+             processed: normalizeClashYaml(processed?.$content ?? ''),
++            trace: processorTrace.snapshot(),
+         });
+     } catch (err) {
+         $.error(err.message ?? err);
+         failed(
+             res,
+-            new InternalServerError(
+-                `INTERNAL_SERVER_ERROR`,
+-                `Failed to preview file`,
+-                `Reason: ${err.message ?? err}`,
+-            ),
++            previewError('file', err, processorTrace),
+         );
+     }
+ }
+ 
+ async function compareSub(req, res) {
++    const processorTrace = createProcessorTrace();
+     const sub = req.body;
+     const mode = resolveIgnoreFailedRemoteSubMode(sub.ignoreFailedRemoteSub);
+ 
+@@ -108,7 +137,7 @@
+                                 undefined,
+                                 sub.noCache,
+                                 true,
+-                                { returnRaw: true },
++                                { returnRaw: true, processorTrace },
+                             );
+                         } catch (err) {
+                             errors[url] = err;
+@@ -170,12 +199,13 @@
+             { [sub.name]: sub },
+             undefined,
+             sourceRaw,
++            { processorTrace, processorScope: { kind: 'sub', name: sub.name } },
+         );
+ 
+         // produce
+-        success(res, { original, processed });
++        success(res, { original, processed, trace: processorTrace.snapshot() });
+     } catch (err) {
+-        if (shouldFallbackIgnoreFailedRemoteSub(mode)) {
++        if (shouldFallbackIgnoreFailedRemoteSub(mode, err)) {
+             notifyIgnoreFailedRemoteSubFallback({
+                 mode,
+                 error: err,
+@@ -192,23 +222,20 @@
+                     err.message ?? err
+                 }`,
+             );
+-            success(res, { original: [], processed: [] });
++            success(res, { original: [], processed: [], trace: processorTrace.snapshot() });
+             return;
+         }
+ 
+         $.error(err.message ?? err);
+         failed(
+             res,
+-            new InternalServerError(
+-                `INTERNAL_SERVER_ERROR`,
+-                `Failed to preview subscription`,
+-                `Reason: ${err.message ?? err}`,
+-            ),
++            previewError('subscription', err, processorTrace),
+         );
+     }
+ }
+ 
+ async function compareCollection(req, res) {
++    const processorTrace = createProcessorTrace();
+     const collection = req.body;
+     const collectionMode = resolveIgnoreFailedRemoteSubMode(
+         collection.ignoreFailedRemoteSub,
+@@ -268,7 +295,7 @@
+                                             undefined,
+                                             sub.noCache,
+                                             true,
+-                                            { returnRaw: true },
++                                            { returnRaw: true, processorTrace },
+                                         );
+                                     } catch (err) {
+                                         errors[url] = err;
+@@ -335,11 +362,12 @@
+                         { [sub.name]: sub, _collection: collection },
+                         undefined,
+                         currentRaw,
++                        { processorTrace, processorScope: { kind: 'sub', name: sub.name } },
+                     );
+                     results[name] = currentProxies;
+                     rawResults[name] = currentRaw;
+                 } catch (err) {
+-                    if (shouldFallbackIgnoreFailedRemoteSub(subMode)) {
++                    if (shouldFallbackIgnoreFailedRemoteSub(subMode, err)) {
+                         notifyIgnoreFailedRemoteSubFallback({
+                             mode: subMode,
+                             error: err,
+@@ -371,6 +399,11 @@
+             }),
+         );
+ 
++        for (const [name, error] of Object.entries(errors)) {
++            if (isProcessorError(error)) {
++                throw new ProcessorError(`Subscription "${name}": ${error.message}`, error);
++            }
++        }
+         if (Object.keys(errors).length > 0) {
+             const message = `组合订阅 ${collection.name} 的子订阅 ${Object.keys(
+                 errors,
+@@ -420,11 +453,12 @@
+             { _collection: collection },
+             undefined,
+             rawResults,
++            { processorTrace, processorScope: { kind: 'collection', name: collection.name } },
+         );
+ 
+-        success(res, { original, processed });
++        success(res, { original, processed, trace: processorTrace.snapshot() });
+     } catch (err) {
+-        if (shouldFallbackIgnoreFailedRemoteSub(collectionMode)) {
++        if (shouldFallbackIgnoreFailedRemoteSub(collectionMode, err)) {
+             notifyIgnoreFailedRemoteSubFallback({
+                 mode: collectionMode,
+                 error: err,
+@@ -441,18 +475,14 @@
+                     err.message ?? err
+                 }`,
+             );
+-            success(res, { original: [], processed: [] });
++            success(res, { original: [], processed: [], trace: processorTrace.snapshot() });
+             return;
+         }
+ 
+         $.error(err.message ?? err);
+         failed(
+             res,
+-            new InternalServerError(
+-                `INTERNAL_SERVER_ERROR`,
+-                `Failed to preview collection`,
+-                `Reason: ${err.message ?? err}`,
+-            ),
++            previewError('collection', err, processorTrace),
+         );
+     }
+ }
+--- a/backend/src/restful/response.js
++++ b/backend/src/restful/response.js
+@@ -12,6 +12,12 @@
+             code: error.code,
+             type: error.type,
+             message: error.message,
++            ...(error.processor && !resp.req?.route?.path?.startsWith('/share/')
++                ? { processor: error.processor }
++                : {}),
++            ...(error.trace && resp.req?.route?.path?.startsWith('/api/preview/')
++                ? { trace: error.trace }
++                : {}),
+             details: resp.req?.route?.path?.startsWith('/share/')
+                 ? '详情请查看日志'
+                 : error.details,
+--- a/backend/src/restful/sync.js
++++ b/backend/src/restful/sync.js
+@@ -1,4 +1,5 @@
+ import $ from '@/core/app';
++import { ProcessorError, isProcessorError } from '@/core/proxy-utils/processor-error';
+ import {
+     ARTIFACTS_KEY,
+     COLLECTIONS_KEY,
+@@ -98,6 +99,7 @@
+     proxy,
+     noCache,
+     noFlow,
++    processorTrace,
+     ignoreFailedRemoteFile,
+     notifyTitle = '🌍 Sub-Store 处理文件失败',
+ }) {
+@@ -122,7 +124,7 @@
+                     undefined,
+                     noCache || file.noCache,
+                     undefined,
+-                    { noFlow },
++                    { noFlow, processorTrace },
+                 );
+             } catch (err) {
+                 errors[url] = err;
+@@ -171,6 +173,7 @@
+         proxy,
+         noCache,
+         noFlow,
++        processorTrace,
+         notifyTitle,
+     } = {},
+ ) {
+@@ -186,6 +189,7 @@
+             proxy,
+             noCache,
+             noFlow,
++            processorTrace,
+             ignoreFailedRemoteFile,
+             notifyTitle,
+         });
+@@ -211,6 +215,7 @@
+         proxy,
+         noCache,
+         noFlow,
++        processorTrace,
+         ignoreFailedRemoteFile,
+         notifyTitle,
+     });
+@@ -263,6 +268,7 @@
+                 'include-unsupported-proxy': file?.includeUnsupportedProxy,
+             },
+             noFlow: sourceOptions.noFlow,
++            processorTrace: sourceOptions.processorTrace,
+         });
+     }
+     return ProxyUtils.yaml.safeDump(config);
+@@ -289,6 +295,7 @@
+     noFlow,
+     all,
+     includeRaw,
++    processorTrace,
+ }) {
+     platform = platform || 'JSON';
+ 
+@@ -336,7 +343,7 @@
+                                     awaitCustomCache,
+                                     noCache || sub.noCache,
+                                     true,
+-                                    { returnRaw: true, noFlow: skipFlow },
++                                    { returnRaw: true, noFlow: skipFlow, processorTrace },
+                                 );
+                             } catch (err) {
+                                 errors[url] = err;
+@@ -401,7 +408,7 @@
+                                     awaitCustomCache,
+                                     noCache || sub.noCache,
+                                     true,
+-                                    { returnRaw: true, noFlow: skipFlow },
++                                    { returnRaw: true, noFlow: skipFlow, processorTrace },
+                                 );
+                             } catch (err) {
+                                 errors[url] = err;
+@@ -471,7 +478,7 @@
+                 { [sub.name]: sub },
+                 $options,
+                 sourceRaw,
+-                { noFlow: skipFlow },
++                { noFlow: skipFlow, processorTrace, processorScope: { kind: 'sub', name: sub.name } },
+             );
+             if (proxies.length === 0) {
+                 throw new Error(`订阅 ${name} 中不含有效节点`);
+@@ -507,7 +514,7 @@
+                   }
+                 : result;
+         } catch (err) {
+-            if (!shouldFallbackIgnoreFailedRemoteSub(subIgnoreFailedRemoteSub)) {
++            if (!shouldFallbackIgnoreFailedRemoteSub(subIgnoreFailedRemoteSub, err)) {
+                 throw err;
+             }
+ 
+@@ -617,6 +624,7 @@
+                                                 true,
+                                                 {
+                                                     returnRaw: true,
++                                                    processorTrace,
+                                                     noFlow:
+                                                         skipFlow || sub.noFlow,
+                                                 },
+@@ -691,7 +699,7 @@
+                             },
+                             undefined,
+                             currentRaw,
+-                            { noFlow: skipFlow || sub.noFlow },
++                            { noFlow: skipFlow || sub.noFlow, processorTrace, processorScope: { kind: 'sub', name: sub.name } },
+                         );
+                         results[name] = currentProxies;
+                         rawResults[name] = currentRaw;
+@@ -704,7 +712,7 @@
+                     } catch (err) {
+                         processed++;
+ 
+-                        if (shouldFallbackIgnoreFailedRemoteSub(subMode)) {
++                        if (shouldFallbackIgnoreFailedRemoteSub(subMode, err)) {
+                             notifyIgnoreFailedRemoteSubFallback({
+                                 mode: subMode,
+                                 error: err,
+@@ -739,6 +747,11 @@
+                 }),
+             );
+ 
++            for (const [name, error] of Object.entries(errors)) {
++                if (isProcessorError(error)) {
++                    throw new ProcessorError(`Subscription "${name}": ${error.message}`, error);
++                }
++            }
+             if (Object.keys(errors).length > 0) {
+                 const message = `组合订阅 ${collection.name} 的子订阅 ${Object.keys(
+                     errors,
+@@ -796,7 +809,7 @@
+                 { _collection: collection },
+                 $options,
+                 rawResults,
+-                { noFlow: skipFlow },
++                { noFlow: skipFlow, processorTrace, processorScope: { kind: 'collection', name: collection.name } },
+             );
+             if (proxies.length === 0) {
+                 throw new Error(`组合订阅 ${name} 中不含有效节点`);
+@@ -829,6 +842,7 @@
+             if (
+                 !shouldFallbackIgnoreFailedRemoteSub(
+                     collectionIgnoreFailedRemoteSub,
++                    err,
+                 )
+             ) {
+                 throw err;
+@@ -895,6 +909,7 @@
+         let raw = '';
+         if (isMihomoConfigFile(file)) {
+             raw = await prepareMihomoProfileContent(file, {
++                processorTrace,
+                 url,
+                 ua,
+                 content,
+@@ -906,6 +921,7 @@
+             });
+         } else {
+             raw = await resolveFileRawContent(file, {
++                processorTrace,
+                 url,
+                 ua,
+                 content,
+@@ -924,7 +940,7 @@
+ 
+         // apply processors
+         const processed =
+-            Array.isArray(file.process) && file.process.length > 0
++            (Array.isArray(file.process) && file.process.length > 0) || processorTrace
+                 ? await ProxyUtils.process(
+                       {
+                           $files: files,
+@@ -932,12 +948,12 @@
+                           $options,
+                           $file: file,
+                       },
+-                      file.process,
++                      Array.isArray(file.process) ? file.process : [],
+                       undefined,
+                       undefined,
+                       undefined,
+                       undefined,
+-                      { noFlow },
++                      { noFlow, processorTrace, processorScope: { kind: 'file', name: file.name } },
+                   )
+                 : { $content: filesContent, $files: files, $options };
+ 
+--- a/backend/src/test/restful/sync.spec.js
++++ b/backend/src/test/restful/sync.spec.js
+@@ -349,7 +349,7 @@
+         }
+     });
+ 
+-    it('returns available raw alongside subscription and collection fallback output', async function () {
++    it('rejects processor failures despite subscription and collection fallback', async function () {
+         const failingProcess = [
+             {
+                 type: 'Script Operator',
+@@ -362,25 +362,21 @@
+                 type === 'subscription' ? failingProcess : [];
+             state[COLLECTIONS_KEY][0].process =
+                 type === 'collection' ? failingProcess : [];
+-            const output = await produceArtifact({
++            const [output] = await Promise.allSettled([produceArtifact({
+                 type,
+                 name: type === 'subscription' ? 'raw-sub' : 'raw-col',
+                 produceType: 'internal',
+                 ignoreFailedRemoteSub: 'fallbackQuiet',
+                 includeRaw: true,
+-            });
++            })]);
+ 
+-            expect(output).to.deep.equal({
+-                result: [],
+-                raw:
+-                    type === 'subscription'
+-                        ? [VLESS_WS]
+-                        : { 'raw-sub': [VLESS_WS] },
+-            });
++            expect(output.status).to.equal('rejected');
++            expect(output.reason.code).to.equal('PROCESSOR_FAILED');
++            expect(output.reason.message).to.include('boom');
+         }
+     });
+ 
+-    it('preserves ignored and fallback child failures in returned collection raw', async function () {
++    it('rejects child processor failures despite ignored and fallback modes', async function () {
+         state[SUBS_KEY].push({
+             name: 'broken-sub',
+             source: 'local',
+@@ -398,18 +394,17 @@
+         state[COLLECTIONS_KEY][0].subscriptions.push('broken-sub');
+ 
+         for (const mode of ['quiet', 'fallbackQuiet']) {
+-            const output = await produceArtifact({
++            const [output] = await Promise.allSettled([produceArtifact({
+                 type: 'collection',
+                 name: 'raw-col',
+                 ignoreFailedRemoteSub: mode,
+                 includeRaw: true,
+-            });
++            })]);
+ 
+-            expect(JSON.parse(output.result)).to.have.length(1);
+-            expect(output.raw).to.deep.equal({
+-                'raw-sub': [VLESS_WS],
+-                'broken-sub': mode === 'quiet' ? undefined : [],
+-            });
++            expect(output.status).to.equal('rejected');
++            expect(output.reason.code).to.equal('PROCESSOR_FAILED');
++            expect(output.reason.message).to.include('broken-sub');
++            expect(output.reason.message).to.include('boom');
+         }
+     });
+ 
+--- a/backend/src/utils/download.js
++++ b/backend/src/utils/download.js
+@@ -315,6 +315,7 @@
+                         type: 'file',
+                         name,
+                         noFlow: options?.noFlow,
++                        processorTrace: options?.processorTrace,
+                     }),
+                     returnRaw,
+                 );
+--- a/backend/src/restful/collections.js
++++ b/backend/src/restful/collections.js
+@@ -101,10 +101,17 @@
+             const allFiles = $.read(FILES_KEY) || [];
+             for (const file of allFiles) {
+                 if (
+-                    file.sourceType === 'collection' &&
++                    (file.sourceType === 'collection' || (['mihomoConfig', 'mihomoProfile'].includes(file.type) && !['subscription', 'collection', 'local', 'remote', 'none'].includes(file.sourceType))) &&
+                     file.sourceName === oldCol.name
+                 ) {
+                     file.sourceName = newCol.name;
++                }
++                for (const processor of Array.isArray(file.process) ? file.process : []) {
++                    const args = processor?.args;
++                    if (processor?.type === 'Add Proxies From Subscription Operator' &&
++                        args?.sourceName === oldCol.name && (args.sourceType === undefined ? 'subscription' : args.sourceType) === 'collection') {
++                        args.sourceName = newCol.name;
++                    }
+                 }
+             }
+             $.write(allArtifacts, ARTIFACTS_KEY);
+--- a/backend/src/restful/subscriptions.js
++++ b/backend/src/restful/subscriptions.js
+@@ -338,6 +338,13 @@
+                 ) {
+                     file.sourceName = sub.name;
+                 }
++                for (const processor of Array.isArray(file.process) ? file.process : []) {
++                    const args = processor?.args;
++                    if (processor?.type === 'Add Proxies From Subscription Operator' &&
++                        args?.sourceName === name && (args.sourceType === undefined ? 'subscription' : args.sourceType) === 'subscription') {
++                        args.sourceName = sub.name;
++                    }
++                }
+             }
+ 
+             $.write(allCols, COLLECTIONS_KEY);
+--- a/backend/src/utils/artifact-cron.js
++++ b/backend/src/utils/artifact-cron.js
+@@ -5,6 +5,14 @@
+ const artifactCronJobs = new Map();
+ const runningArtifactCronNames = new Set();
+ let syncArtifactByName;
++let nativePaused = false;
++if ($.env.isNode) {
++    globalThis[Symbol.for('ppclash.sub-store.lifecycle')] = {
++        pause() { nativePaused = true; stopArtifactCronJobs(); },
++        idle() { return runningArtifactCronNames.size === 0; },
++        resume() { nativePaused = false; refreshArtifactCronJobs(); },
++    };
++}
+ 
+ function getArtifactCron(artifact) {
+     const cron = artifact?.cron == null ? '' : `${artifact.cron}`.trim();
+@@ -69,6 +77,7 @@
+ }
+ 
+ async function runArtifactCron(name, logName, cron) {
++    if (nativePaused) return;
+     if (runningArtifactCronNames.has(name)) {
+         $.info(
+             `[ARTIFACT CRON] ${logName} ${cron} skipped: previous run is still running`,
+@@ -117,7 +126,7 @@
+ }
+ 
+ function refreshArtifactCronJobs() {
+-    if (!$.env.isNode || !syncArtifactByName) return;
++    if (!$.env.isNode || !syncArtifactByName || nativePaused) return;
+ 
+     stopArtifactCronJobs();
+ 

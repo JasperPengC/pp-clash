@@ -16,6 +16,7 @@ import {
   IconX,
 } from '../components/icons';
 import { isGroupNode, useApp } from '../store/app';
+import { usePageQuery, useProxyGroupPreference, useViewPreference } from '../store/view-preferences';
 import { isAndroid } from '../core/platform';
 import type { ProxyNode } from '../domain/app';
 import { buildProxyDomain, proxyGroupKind, resolveProxyRoute, type ProxyRoute } from '../core/proxy-domain';
@@ -180,10 +181,10 @@ export function ProxiesPage({ active = true }: { active?: boolean } = {}) {
     finally { nodeLock.current = false; setPendingNode(null); }
   };
 
-  const [query, setQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'default' | 'delay' | 'name'>('default');
-  const [hideUnavailable, setHideUnavailable] = useState(false);
-  const [selectedGroup, setSelectedGroup] = useState<{ scope: string; name: string } | null>(null);
+  const [query, setQuery] = usePageQuery(JSON.stringify(['proxies', activeId]));
+  const [sortBy, setSortBy] = useViewPreference('proxySort');
+  const [hideUnavailable, setHideUnavailable] = useViewPreference('proxyAvailableOnly');
+  const [selectedGroup, setSelectedGroup] = useProxyGroupPreference(activeId);
   const [allGroupsOpen, setAllGroupsOpen] = useState(false);
   const [groupQuery, setGroupQuery] = useState('');
   const [inspectedNode, setInspectedNode] = useState<{ scope: string; name: string } | null>(null);
@@ -312,13 +313,13 @@ export function ProxiesPage({ active = true }: { active?: boolean } = {}) {
     if (!group.nodes.some(node => node.name === group.now)) return;
     changeQuery('');
     setHideUnavailable(false);
-    setSelectedGroup({ scope: domain.identity, name: group.name });
+    setSelectedGroup(group.name);
     setWindowReset(value => value + 1);
     setFocusGroup(group.name);
   };
 
-  const currentGroupName = selectedGroup?.scope === domain.identity && displayGroups.some(group => group.name === selectedGroup.name)
-    ? selectedGroup.name : displayGroups[0]?.name;
+  const currentGroupName = displayGroups.some(group => group.name === selectedGroup)
+    ? selectedGroup : displayGroups[0]?.name;
   const filteredGroups = displayGroups.filter(group => group.name === currentGroupName).map(g => ({ g, nodes: visibleNodes(g.name, g.nodes) }));
   const groupRail = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
@@ -343,7 +344,7 @@ export function ProxiesPage({ active = true }: { active?: boolean } = {}) {
     return () => rail.removeEventListener('wheel', onWheel);
   }, [displayGroups.length]);
   const inspectGroup = (name: string) => {
-    setSelectedGroup({ scope: domain.identity, name });
+    setSelectedGroup(name);
     setInspectedNode(null);
     changeQuery('');
     setAllGroupsOpen(false);

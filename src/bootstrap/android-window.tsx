@@ -5,7 +5,7 @@ import { MobilePageNavigation, PageHeader } from '../components/PageHeader';
 import { SelectionIndicator } from '../components/SelectionIndicator';
 import {
   IconActivity, IconBolt, IconChevronRight, IconDownload, IconGlobe, IconLink, IconLog, IconNodes,
-  IconOverview, IconPower, IconProfiles, IconRefresh, IconRules, IconSettings, IconUpload, IconX,
+  IconOverview, IconPower, IconProfiles, IconRefresh, IconRules, IconSettings, IconUpload, IconX, IconSliders, IconFolder,
 } from '../components/icons';
 import { Segmented } from '../components/ui';
 import { LatencyRing } from '../components/visuals';
@@ -27,6 +27,9 @@ const Rules = asyncView(() => import('../pages/Rules').then(m => ({ default: m.R
 const Logs = asyncView(() => import('../pages/Logs').then(m => ({ default: m.LogsPage })));
 const Dns = asyncView(() => import('../pages/Dns').then(m => ({ default: m.DnsPage })));
 const Traffic = asyncView(() => import('../pages/Traffic').then(m => ({ default: m.TrafficPage })));
+const SubStore = asyncView(() => import('../pages/SubStore').then(m => ({ default: m.SubStorePage })));
+const Override = asyncView(() => import('../pages/Override').then(m => ({ default: m.OverridePage })));
+const Resources = asyncView(() => import('../pages/Resources').then(m => ({ default: m.ResourcesPage })));
 
 void useApp.getState().hydrate();
 if (import.meta.env.DEV) void import('../dev/preview').then(m => m.applyPreviewIfRequested());
@@ -40,6 +43,9 @@ const tabs = [
 ] as const;
 
 const morePages = [
+  { id: 'sub-store', label: 'Sub-Store', Icon: IconProfiles },
+  { id: 'override', label: '覆写配置', Icon: IconSliders },
+  { id: 'resources', label: '资源管理', Icon: IconFolder },
   { id: 'traffic', label: '流量统计', Icon: IconActivity },
   { id: 'rules', label: '分流规则', Icon: IconRules },
   { id: 'dns', label: 'DNS 配置', Icon: IconGlobe },
@@ -354,6 +360,9 @@ export default function AndroidWindow() {
       {page === 'rules' && <Rules />}
       {page === 'dns' && <Dns />}
       {page === 'logs' && <Logs active={active} />}
+      {page === 'sub-store' && <SubStore />}
+      {page === 'override' && <Override />}
+      {page === 'resources' && <Resources />}
     </main>
     </MobilePageNavigation.Provider>
     <nav className="android-nav selection-track" aria-label="主导航">

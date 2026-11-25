@@ -15,3 +15,12 @@
 .collection-sources button[aria-pressed=true] { color: var(--accent); }
 .collection-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
 .collection-editor footer { justify-content: flex-end; }
+
+.android-window .modal-card:has(.collection-editor) {
+  width: min(100%, 560px);
+  max-height: calc(100dvh - var(--android-top) - var(--android-ime-height, 0px));
+  overscroll-behavior: contain;
+}
+.android-window .collection-sources { max-height: min(20dvh, 132px); }
+.android-window .collection-sources button { min-height: 40px; }
+.android-window .collection-editor footer button { width: 100%; }

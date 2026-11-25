@@ -6,6 +6,10 @@ on:
       release:
         type: boolean
         default: false
+      engine_artifact:
+        description: Shared engine from the calling release workflow
+        type: string
+        default: ''
     secrets:
       ANDROID_KEYSTORE_BASE64:
         required: false
@@ -32,7 +36,69 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  engine:
+    uses: ./.github/workflows/sub-store-engine.yml
+    with:
+      reuse_artifact: ${{ inputs.engine_artifact || '' }}
+
+  runtime:
+    needs: engine
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: android-arm64
+            arch: aarch64
+          - target: android-x64
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install pinned Android Node build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-12 g++-12 python3 patch xz-utils
+          sdkmanager 'ndk;28.2.13676358'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.engine_artifact || 'sub-store-engine' }}
+          path: .cache/cloud-tools-20261121/runtime
+      - uses: actions/cache@v4
+        with:
+          path: .cache/sub-store-android/${{ matrix.target }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('.github/workflows/android.yml', 'scripts/sub-store/android-runtime-lock.json', 'scripts/sub-store/*patch', 'scripts/sub-store/build-android-runtime.cjs') }}
+      - name: Build and validate complete Android Node runtime
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          node scripts/sub-store/build-android-runtime.cjs --target '${{ matrix.target }}' --host-cc gcc-12 --host-cxx g++-12 --jobs 2
+          python3 scripts/validate-sub-store-resources.py src-tauri/resources/sub-store '${{ matrix.arch }}' --platform android
+          node scripts/sub-store/build-android-runtime.cjs --target '${{ matrix.target }}' --verify-elf 'src-tauri/resources/sub-store/${{ matrix.target }}/node'
+          tar -cf "$RUNNER_TEMP/${{ matrix.target }}.tar" -C src-tauri/resources/sub-store '${{ matrix.target }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.target }}
+          retention-days: 3
+          if-no-files-found: error
+          path: ${{ runner.temp }}/${{ matrix.target }}.tar
+
   build:
+    needs: runtime
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
@@ -49,7 +115,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.5'
+          node-version: '24.18.0'
           cache: npm
       - uses: actions/setup-java@v4
         with:
@@ -86,6 +152,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.engine_artifact || 'sub-store-engine' }}
+          path: .cache/cloud-tools-20261121/runtime
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-android-*
+          merge-multiple: true
+          path: .cache/android-node-artifacts
+      - name: Prepare verified Android service resources
+        run: |
+          node scripts/sub-store/prepare-runtime.cjs --shared-only
+          for target in android-arm64 android-x64; do
+            tar -xf ".cache/android-node-artifacts/$target.tar" -C src-tauri/resources/sub-store
+          done
+          python3 scripts/validate-sub-store-resources.py src-tauri/resources/sub-store aarch64 --platform android
+          python3 scripts/validate-sub-store-resources.py src-tauri/resources/sub-store x86_64 --platform android
       - run: npm ci
       - name: Build and verify Android artifacts
         run: bash scripts/build-android.sh "$BUILD_MODE"

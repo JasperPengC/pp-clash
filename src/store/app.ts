@@ -1,8 +1,11 @@
 import { buildCollection, collectionSources } from '../application/profile-collection';
-import type { CollectionRecipe } from '../domain/app';
+import type { CollectionRecipe, SubStoreReference } from '../domain/app';
+import { downloadSubStoreProfile } from '../core/sub-store/download';
+import { webdavService } from '../core/webdav-service';
 import { isGroupNode, parseRuntimeGroups } from '../core/proxy-runtime';
 import { createStatePersistence } from '../application/persistence';
 import { createTrayPublisher } from '../application/tray-sync';
+import { restoreProxySelections } from '../application/restore-proxy-selections';
 import { runtimeOf, overrideOf, configurationInputs, prepareConfigCandidate, type ConfigInputs } from '../application/configuration';
 import type { Profile, CustomRule, ProxyRuntimeSnapshot, ProxyGroup, ToastKind, Toast, AppSettings, OutboundMode, KernelPhase } from '../domain/app';
 import { DEFAULT_SETTINGS } from '../domain/settings';
@@ -27,6 +30,8 @@ import { DEFAULT_LATENCY_URL, GITHUB_LATENCY_URL, groupLatencyTarget, latencyTes
 import type { DelayTestOptions, LatencyResult } from '../core/latency-batch';
 import { readProxyConfiguration } from '../core/proxy-domain';
 import { normalizeSubscriptionUrl, sameSubscriptionUrl, subscriptionFileName } from '../core/subscription-source';
+
+export interface SavedWebDavRestore { savedWebDav: true; name: string; passphrase: string; digest: string }
 
 interface AppStore {
   profiles: Profile[];
@@ -92,10 +97,12 @@ interface AppStore {
 
   /** 启动时从磁盘水合。 */
   hydrate: () => Promise<void>;
-  restoreBackup: (backup: string | WebDavRestore) => Promise<void>;
+  restoreBackup: (backup: string | WebDavRestore | SavedWebDavRestore) => Promise<void>;
   importProfile: (url: string, useProxy?: boolean) => Promise<boolean>;
   /** 导入本地 YAML/JSON 文件；url 字段保存文件路径，便于后续重新读取。 */
   saveCollection: (name: string, recipe: CollectionRecipe, id?: string) => Promise<void>;
+  addSubStoreProfile: (name: string, reference: SubStoreReference, raw: string) => Promise<void>;
+  renameSubStoreReferences: (change: { kind: SubStoreReference['kind']; oldName: string; newName: string }) => Promise<void>;
   importProfileFile: (path: string) => Promise<boolean>;
   activate: (id: string) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
@@ -120,7 +127,7 @@ interface AppStore {
   refreshGroups: (quiet?: boolean) => Promise<boolean>;
   /** 来源元数据按会话读取一次；显式刷新可重试，不能阻塞节点确认。 */
   refreshProxyProviders: (force?: boolean) => Promise<boolean>;
-  selectNode: (group: string, node: string, expectedRevision?: string) => Promise<boolean>;
+  selectNode: (group: string, node: string, expectedRevision?: string, beforeSelect?: () => boolean) => Promise<boolean>;
   togglePinNode: (group: string, node: string) => void;
   toggleFixedNode: (group: string, node: string) => Promise<boolean>;
   testDelay: (node: string, targetUrl?: string, options?: DelayTestOptions) => Promise<number | null>;
@@ -555,6 +562,12 @@ function configInputsForProfile(s: AppStore, profile: Profile): ConfigInputs {
     groups: s.activeId === profile.id ? s.groups : [] })!;
 }
 
+function profileRefreshInputKey(s: AppStore, profile: Profile): string {
+  const inputs = configInputsForProfile(s, profile);
+  // 手选节点允许在下载期间变化；提交时基于最新选择重新生成候选。
+  return JSON.stringify({ ...inputs, runtime: { ...inputs.runtime, currentNode: '', selectedNodes: {} } });
+}
+
 async function validateImportedProfile(state: AppStore, profile: Profile, current: () => boolean) {
   validateSubscriptionCandidate(profile.raw);
   const inputs = configInputsForProfile({ ...state, profiles: [...state.profiles, profile] }, profile);
@@ -700,7 +713,8 @@ export const useApp = create<AppStore>((set, get) => ({
       } else {
         const session = get().persistenceSession;
         if (!session) throw new Error('请在应用载入完成后恢复');
-        await api.webdavRestore(backup, session);
+        if ('savedWebDav' in backup) await webdavService.restore({ name: backup.name, passphrase: backup.passphrase, digest: backup.digest, session });
+        else await api.webdavRestore(backup, session);
       }
       // 恢复成功后旧内存保持只读，只有完整水合恢复态才重新获得写权限。
       set({ persistenceSession: undefined, persistenceFrozen: true, restoredStatePending: true, restoringBackup: false });
@@ -1032,6 +1046,54 @@ export const useApp = create<AppStore>((set, get) => ({
     } finally { set({ importing: false, busy: configPending > 0, importStage: null }); }
   },
 
+  renameSubStoreReferences: async ({ kind, oldName, newName }) => {
+    const before = get();
+    if (oldName === newName) return;
+    if (!newName.trim() || newName.length > 256 || !['sub', 'collection'].includes(kind)) throw new Error('Sub-Store 来源名称无效');
+    const linked = before.profiles.filter(profile => profile.subStore?.kind === kind && profile.subStore.name === oldName);
+    if (!linked.length) return;
+    if (before.busy || before.importing || before.activatingProfile || before.persistenceFrozen) throw new Error('应用状态正在处理，无法修改来源关联');
+    const token = lifecycle.token();
+    const current = () => lifecycle.current(token) && !get().persistenceFrozen && before.persistenceSession === get().persistenceSession;
+    set({ busy: true });
+    const ids = new Set(linked.map(profile => profile.id));
+    set(s => ({ profiles: s.profiles.map(profile => ids.has(profile.id) ? { ...profile, subStore: { kind, name: newName } } : profile) }));
+    try {
+      await persist(get(), true);
+      if (!current()) throw new Error('状态会话已变化，请重新检查来源关联');
+    } catch (error) {
+      if (current()) set(s => ({ profiles: s.profiles.map(profile => ids.has(profile.id) && profile.subStore?.name === newName
+        ? { ...profile, subStore: { kind, name: oldName } } : profile) }));
+      throw error;
+    } finally { if (current()) set({ busy: configPending > 0 }); }
+  },
+
+  addSubStoreProfile: async (name, reference, raw) => {
+    name = name.trim();
+    if (!name || name.length > 80 || !['sub', 'collection'].includes(reference.kind)
+      || !reference.name.trim() || reference.name.length > 256) throw new Error('请输入有效的订阅名称与 Sub-Store 来源');
+    const before = get();
+    if (before.busy || before.importing || before.activatingProfile || before.persistenceFrozen) throw new Error('状态正在处理，请稍后重试');
+    if (before.profiles.some(p => p.subStore?.kind === reference.kind && p.subStore.name === reference.name)) {
+      throw new Error('此 Sub-Store 来源已添加，请更新已有订阅');
+    }
+    const token = lifecycle.token();
+    const current = () => lifecycle.current(token) && !get().persistenceFrozen && before.persistenceSession === get().persistenceSession;
+    set({ importing: true, busy: true, importStage: 'validating' });
+    try {
+      const profile: Profile = { id: crypto.randomUUID(), name, url: '', raw, sourceType: 'substore',
+        subStore: { ...reference }, updatedAt: Date.now(), userinfo: null, updateIntervalHours: null };
+      await validateImportedProfile(get(), profile, current);
+      if (!current()) throw new Error('操作状态已变化，请重新导入');
+      set(s => ({ profiles: [...s.profiles, profile] }));
+      try { await persist(get(), true); }
+      catch (error) {
+        if (current()) set(s => ({ profiles: s.profiles.filter(item => item.id !== profile.id) }));
+        throw error;
+      }
+    } finally { set({ importing: false, busy: configPending > 0, importStage: null }); }
+  },
+
   importProfileFile: async (path) => {
     const token = lifecycle.token();
     if (!isTauri) {
@@ -1207,14 +1269,14 @@ export const useApp = create<AppStore>((set, get) => ({
       return Promise.resolve(false);
     }
     const dependencies = p.collection?.sources.map(key => before.profiles.find(source => source.id === key));
-    const sourceKey = JSON.stringify(configInputsForProfile(before, p));
+    const sourceKey = profileRefreshInputKey(before, p);
     let stale = false;
     let request: number | undefined;
     // 记录经过的变化，A→B→A 也不能让旧下载重新取得提交权。
     const unsubscribe = useApp.subscribe(s => {
       if (dependencies?.some(source => !source || s.profiles.find(x => x.id === source.id)?.url !== source.url) || s.profiles.find(x => x.id === id) !== p || s.activeId !== before.activeId
         || s.kernelPhase !== before.kernelPhase || s.connectedAt !== before.connectedAt
-        || JSON.stringify(configInputsForProfile(s, p)) !== sourceKey) stale = true;
+        || profileRefreshInputKey(s, p) !== sourceKey) stale = true;
     });
     const current = () => !stale && lifecycle.current(token) && (request === undefined || request === configRequest);
     const run = (async () => {
@@ -1227,7 +1289,10 @@ export const useApp = create<AppStore>((set, get) => ({
       try {
         if (p.useProxy && before.kernelPhase !== 'running' && !quiet) get().notify('info', '内核未运行，直连更新');
         const proxyPort = p.useProxy && before.kernelPhase === 'running' ? before.settings.mixedPort : undefined;
-        const payload = p.sourceType === 'collection' && p.collection
+        const payload = p.sourceType === 'substore' && p.subStore
+          ? { raw: await downloadSubStoreProfile(p.subStore, proxyPort),
+              profileTitle: null, contentDisposition: null, subscriptionUserinfo: null, profileUpdateInterval: null }
+          : p.sourceType === 'collection' && p.collection
           ? { raw: (await buildCollection(collectionSources(before.profiles, p.collection), p.collection, true,
               before.kernelPhase === 'running' ? before.settings.mixedPort : undefined)).raw, profileTitle: null,
               contentDisposition: null, subscriptionUserinfo: null, profileUpdateInterval: null }
@@ -1241,114 +1306,158 @@ export const useApp = create<AppStore>((set, get) => ({
         const meta = parseSubscriptionMeta(payload);
         const nextProfile = { ...p, raw: payload.raw, name: meta.name ?? p.name,
           userinfo: meta.traffic ?? p.userinfo, updateIntervalHours: meta.updateIntervalHours ?? p.updateIntervalHours };
-        const inputs: ConfigInputs = JSON.parse(JSON.stringify(configInputsForProfile(get(), nextProfile)));
-        configPending += 1; counted = true; set({ busy: true });
-        stage = '生成或校验配置';
-        const prepared = await prepareConfigCandidate(inputs, current);
-        if (!prepared) return false;
-        candidate = prepared.candidate;
-        if (!current()) return false;
-        const publishProfile = () => {
-          unsubscribe();
-          set(s => ({ profiles: s.profiles.map(x => x.id === id ? { ...x, ...nextProfile, updatedAt: Date.now() } : x) }));
-        };
-        if (before.activeId !== id) {
-          publishProfile();
-        } else {
-          // 固定节点不能因新订阅缺失或覆写被静默移除，再把默认节点当成更新成功。
-          stage = '检查固定节点';
-          const groups = JSON.parse(prepared.config)['proxy-groups'] ?? [];
-          const fixedSelections = { ...inputs.runtime.fixedNodes };
-          for (const [group, node] of Object.entries(fixedSelections)) {
-            if (!groups.some((g: any) => g.name === group && g.type === 'select'
-              && g['default-selected'] === node)) {
-              throw new Error(`候选订阅未保留固定节点「${group} / ${node}」`);
-            }
-          }
-          request = ++configRequest;
-          const ownsRequest = current;
-          const runCommit = configCommitChain.then(() => lifecycle.serial(async () => {
-            if (!ownsRequest()) return false;
-            const receipt = candidate!;
-            stage = '提交配置';
-            const absConfig = await api.commitConfig(receipt);
-            candidate = undefined;
-            let attemptedLoad = false;
-            const base = `http://127.0.0.1:${before.settings.controllerPort}`;
-            const secret = before.settings.controllerSecret;
-            const reload = () => api.mihomo('PUT', '/configs?force=true', { path: absConfig }, base, secret);
-            const sameSession = () => lifecycle.current(token) && get().kernelPhase === 'running'
-              && get().connectedAt === before.connectedAt;
-            const rollback = async () => {
-              try {
-                await api.finishConfig(receipt, true);
-                // 超时可能发生在内核已接受之后；旧文件恢复后明确恢复旧运行版本。
-                if (attemptedLoad && sameSession()) {
-                  set(s => ({ runtimeConfigRevision: s.runtimeConfigRevision + 1 }));
-                  await reload();
+        let applied = false;
+        // 选择变化时重新校验候选；有界重试避免持续操作造成无限更新。
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (!current()) return false;
+          const inputs: ConfigInputs = JSON.parse(JSON.stringify(configInputsForProfile(get(), nextProfile)));
+          stage = '生成或校验配置';
+          const prepared = await prepareConfigCandidate(inputs, current);
+          if (!prepared) return false;
+          candidate = prepared.candidate;
+          if (!current()) return false;
+          const publishProfile = () => {
+            unsubscribe();
+            set(s => ({ profiles: s.profiles.map(x => x.id === id ? { ...x, ...nextProfile, updatedAt: Date.now() } : x) }));
+          };
+          if (before.activeId !== id) {
+            publishProfile();
+          } else {
+            request = ++configRequest;
+            const runCommit = configCommitChain.then(() => lifecycle.serial(async () => {
+              if (!current()) return false;
+              const selectionKey = JSON.stringify(inputs);
+              if (JSON.stringify(configInputsForProfile(get(), nextProfile)) !== selectionKey) return 'retry' as const;
+              // 下载与独立候选校验不占全局操作锁，仅最终提交需要串行保护。
+              configPending += 1; counted = true; set({ busy: true });
+              const ownsRequest = () => current() && JSON.stringify(configInputsForProfile(get(), nextProfile)) === selectionKey;
+              if (!ownsRequest()) return false;
+              // 固定节点不能因新订阅缺失或覆写被静默移除，再把默认节点当成更新成功。
+              stage = '检查固定节点';
+              const candidateGroups = JSON.parse(prepared.config)['proxy-groups'] ?? [];
+              const fixedSelections = { ...inputs.runtime.fixedNodes };
+              for (const [group, node] of Object.entries(fixedSelections)) {
+                if (!candidateGroups.some((g: any) => g.name === group && g.type === 'select'
+                  && g['default-selected'] === node)) {
+                  throw new Error(`候选订阅未保留固定节点「${group} / ${node}」`);
                 }
-              } catch (error) {
-                rollbackFailure = errorText(error);
-                const stillCurrent = current();
-                const sessionUnknown = sameSession();
-                validatedRevision = -1; validatedPath = ''; preparedInputKey = ''; preparedRouting = null;
-                if (sessionUnknown) globalGroup = undefined;
-                set(s => ({ configPath: '', audit: [], stats: null,
-                  ...(sessionUnknown ? { groups: [], routing: null, routeRevision: s.routeRevision + 1,
-                    kernelError: '订阅更新回退未确认，请检查运行配置后重新连接' } : {}),
-                  ...(stillCurrent ? { profileRefreshErrors: { ...s.profileRefreshErrors,
-                    [id]: `回退配置失败：${rollbackFailure}；已保留原订阅内容，运行状态未确认` } } : {}) }));
-                stage = '回退配置';
-                get().notify('error', `订阅更新回退未确认：${errorText(error)}；已保留原订阅，请检查后重新连接`);
               }
-            };
-            try {
-              if (!ownsRequest()) { await rollback(); return false; }
-              let observed: unknown;
-              if (before.kernelPhase === 'running') {
-                stage = '加载配置';
-                attemptedLoad = true;
-                set(s => ({ runtimeConfigRevision: s.runtimeConfigRevision + 1, runtimeConfigTransition: true }));
-                await reload();
+              const receipt = candidate!;
+              stage = '提交配置';
+              const absConfig = await api.commitConfig(receipt);
+              candidate = undefined;
+              let attemptedLoad = false;
+              const base = `http://127.0.0.1:${before.settings.controllerPort}`;
+              const secret = before.settings.controllerSecret;
+              const rememberedSelections = Object.fromEntries(Object.entries(inputs.runtime.selectedNodes)
+                .filter(([group]) => !Object.hasOwn(fixedSelections, group)));
+              const reload = () => api.mihomo('PUT', '/configs?force=true', { path: absConfig }, base, secret);
+              const sameSession = () => lifecycle.current(token) && get().kernelPhase === 'running'
+                && get().connectedAt === before.connectedAt;
+              const rollback = async () => {
+                try {
+                  await api.finishConfig(receipt, true);
+                  // 超时可能发生在内核已接受之后；旧文件恢复后明确恢复旧运行版本。
+                  if (attemptedLoad && sameSession()) {
+                    set(s => ({ runtimeConfigRevision: s.runtimeConfigRevision + 1 }));
+                    const rollbackRevision = get().runtimeConfigRevision;
+                    const ownsRollback = () => sameSession() && get().activeId === id
+                      && get().runtimeConfigRevision === rollbackRevision;
+                    await reload();
+                    if (ownsRollback()) {
+                      const previous = await api.mihomo('GET', '/proxies', undefined, base, secret);
+                      const restored = await restoreProxySelections(previous,
+                        { ...inputs.runtime.selectedNodes, ...fixedSelections }, base, secret, ownsRollback);
+                      if (!ownsRollback()) return;
+                      const groups = parseGroups(restored, false, p.raw);
+                      for (const [group, node] of Object.entries(fixedSelections)) {
+                        const loaded = groups.find(g => g.name === group);
+                        if (loaded?.type !== 'Selector' || loaded.now !== node
+                          || !loaded.nodes.some(n => n.name === node && !isGroupNode(n, groups))) {
+                          throw new Error(`内核未确认原固定节点「${group} / ${node}」`);
+                        }
+                      }
+                      parseGroups(restored, true, p.raw);
+                      set(s => ({ groups, proxyRuntime: { profileId: id, revision: rollbackRevision,
+                        connectedAt: s.connectedAt, proxies: (restored as { proxies: Record<string, unknown> }).proxies },
+                        routeRevision: s.routeRevision + 1 }));
+                      void pushTray(get());
+                    }
+                  }
+                } catch (error) {
+                  rollbackFailure = errorText(error);
+                  const stillCurrent = current();
+                  const sessionUnknown = sameSession();
+                  validatedRevision = -1; validatedPath = ''; preparedInputKey = ''; preparedRouting = null;
+                  if (sessionUnknown) globalGroup = undefined;
+                  set(s => ({ configPath: '', audit: [], stats: null,
+                    ...(sessionUnknown ? { groups: [], routing: null, routeRevision: s.routeRevision + 1,
+                      kernelError: '订阅更新回退未确认，请检查运行配置后重新连接' } : {}),
+                    ...(stillCurrent ? { profileRefreshErrors: { ...s.profileRefreshErrors,
+                      [id]: `回退配置失败：${rollbackFailure}；已保留原订阅内容，运行状态未确认` } } : {}) }));
+                  stage = '回退配置';
+                  get().notify('error', `订阅更新回退未确认：${errorText(error)}；已保留原订阅，请检查后重新连接`);
+                }
+              };
+              try {
                 if (!ownsRequest()) { await rollback(); return false; }
-                stage = '确认运行节点';
-                observed = await api.mihomo('GET', '/proxies', undefined, base, secret);
-                if (!ownsRequest()) { await rollback(); return false; }
-                const loadedGroups = parseGroups(observed, false, nextProfile.raw);
-                for (const [group, node] of Object.entries(fixedSelections)) {
-                  const loaded = loadedGroups.find(g => g.name === group);
-                  if (loaded?.type !== 'Selector' || loaded.now !== node
-                    || !loaded.nodes.some(n => n.name === node && !isGroupNode(n, loadedGroups))) {
-                    throw new Error(`内核未确认固定节点「${group} / ${node}」`);
+                let observed: unknown;
+                if (before.kernelPhase === 'running') {
+                  stage = '加载配置';
+                  attemptedLoad = true;
+                  set(s => ({ runtimeConfigRevision: s.runtimeConfigRevision + 1, runtimeConfigTransition: true }));
+                  await reload();
+                  if (!ownsRequest()) { await rollback(); return false; }
+                  stage = '确认运行节点';
+                  observed = await api.mihomo('GET', '/proxies', undefined, base, secret);
+                  if (!ownsRequest()) { await rollback(); return false; }
+                  observed = await restoreProxySelections(observed, rememberedSelections, base, secret, ownsRequest);
+                  if (!ownsRequest()) { await rollback(); return false; }
+                  const loadedGroups = parseGroups(observed, false, nextProfile.raw);
+                  for (const [group, node] of Object.entries(fixedSelections)) {
+                    const loaded = loadedGroups.find(g => g.name === group);
+                    if (loaded?.type !== 'Selector' || loaded.now !== node
+                      || !loaded.nodes.some(n => n.name === node && !isGroupNode(n, loadedGroups))) {
+                      throw new Error(`内核未确认固定节点「${group} / ${node}」`);
+                    }
                   }
                 }
+                // 同步接受候选与派生配置；之后的收尾不再撤销已发布版本。
+                unsubscribe();
+                configRevision += 1; validatedRevision = configRevision; validatedPath = absConfig;
+                preparedInputs = inputs; preparedInputKey = JSON.stringify(inputs);
+                preparedDataDir = prepared.absDir; preparedRouting = prepared.routing;
+                const groups = observed ? parseGroups(observed, true, nextProfile.raw) : undefined;
+                set(s => ({ profiles: s.profiles.map(x => x.id === id ? { ...x, ...nextProfile, updatedAt: Date.now() } : x),
+                  audit: prepared.audit, stats: prepared.stats, configPath: absConfig, dataDir: prepared.absDir,
+                  kernelError: null,
+                  ...(groups ? { groups, proxyRuntime: {profileId: id, revision: s.runtimeConfigRevision, connectedAt: s.connectedAt, proxies: (observed as {proxies: Record<string, unknown>}).proxies}, routing: prepared.routing, routeRevision: s.routeRevision + 1 } : {}) }));
+                if (groups) void pushTray(get());
+                void persist(get());
+                await api.finishConfig(receipt, false).catch(error => {
+                  get().notify('error', `配置已应用，但事务副本清理失败：${errorText(error)}`);
+                });
+                return true;
+              } catch (error) {
+                await rollback();
+                throw error;
+              } finally {
+                if (attemptedLoad) set({ runtimeConfigTransition: false });
               }
-              // 同步接受候选与派生配置；之后的收尾不再撤销已发布版本。
-              unsubscribe();
-              configRevision += 1; validatedRevision = configRevision; validatedPath = absConfig;
-              preparedInputs = inputs; preparedInputKey = JSON.stringify(inputs);
-              preparedDataDir = prepared.absDir; preparedRouting = prepared.routing;
-              const groups = observed ? parseGroups(observed, true, nextProfile.raw) : undefined;
-              set(s => ({ profiles: s.profiles.map(x => x.id === id ? { ...x, ...nextProfile, updatedAt: Date.now() } : x),
-                audit: prepared.audit, stats: prepared.stats, configPath: absConfig, dataDir: prepared.absDir,
-                kernelError: null,
-                ...(groups ? { groups, proxyRuntime: {profileId: id, revision: s.runtimeConfigRevision, connectedAt: s.connectedAt, proxies: (observed as {proxies: Record<string, unknown>}).proxies}, routing: prepared.routing, routeRevision: s.routeRevision + 1 } : {}) }));
-              if (groups) void pushTray(get());
-              void persist(get());
-              await api.finishConfig(receipt, false).catch(error => {
-                get().notify('error', `配置已应用，但事务副本清理失败：${errorText(error)}`);
-              });
-              return ownsRequest();
-            } catch (error) {
-              await rollback();
-              throw error;
-            } finally {
-              if (attemptedLoad) set({ runtimeConfigTransition: false });
+            }));
+            configCommitChain = runCommit.catch(() => undefined);
+            const result = await runCommit;
+            if (result === 'retry') {
+              await api.discardConfig(candidate!);
+              candidate = undefined;
+              continue;
             }
-          }));
-          configCommitChain = runCommit.catch(() => undefined);
-          if (!await runCommit) return false;
+            if (!result) return false;
+          }
+          applied = true;
+          break;
         }
+        if (!applied) throw new Error('节点选择持续变化，本次未应用更新，请稍后重试');
         void persist(get());
         if (!quiet) get().notify('success', '订阅已更新');
         return true;
@@ -1568,7 +1677,7 @@ export const useApp = create<AppStore>((set, get) => ({
     return request;
   },
 
-  selectNode: async (group, node, expectedRevision): Promise<boolean> => {
+  selectNode: async (group, node, expectedRevision, beforeSelect): Promise<boolean> => {
     // 用户操作先使检测结果失效；串行 PUT 保证用户较晚的选择最后生效。
     const manual = expectedRevision === undefined;
     const request = manual ? ++manualSelectionRequest : manualSelectionRequest;
@@ -1579,6 +1688,8 @@ export const useApp = create<AppStore>((set, get) => ({
     return lifecycle.serial(async () => {
       if (!lifecycle.current(token) || get().activeId !== profileId
           || (manual ? request !== manualSelectionRequest : revision !== getRoutingRevision())) return false;
+      // 排队可能跨越休眠；自动探测必须在实际执行前再次取得切换许可。
+      if (beforeSelect && !beforeSelect()) return false;
       set(s => ({ routeRevision: s.routeRevision + 1 }));
       return selectNodeFor(token, profileId, group, node, getRoutingRevision(), expectedRevision === undefined ? 'manual' : 'automatic');
     });

@@ -1,5 +1,6 @@
 """仅合成 ZIP/PE/Mach-O/ELF，验证发布门禁的真实退出码。"""
 import hashlib
+import json
 import os
 import pathlib
 import struct
@@ -176,13 +177,28 @@ class BundleGateTests(unittest.TestCase):
     def local_bundle_fixture(self, bad=None):
         scripts = self.root / "scripts"
         scripts.mkdir(exist_ok=True)
-        for name in ["bundle.sh", "build-dmg.sh", "validate-resources.py", "macos-resource-gate.sh"]:
+        for name in ["bundle.sh", "build-dmg.sh", "validate-resources.py", "validate-sub-store-resources.py", "macos-resource-gate.sh"]:
             if (SCRIPT.parent / name).exists():
                 shutil.copy2(SCRIPT.parent / name, scripts / name)
         (self.root / "src-tauri/resources").mkdir(parents=True, exist_ok=True)
         (self.root / "src-tauri/icons").mkdir(parents=True, exist_ok=True)
         for name in ["icon.png", "icon.icns"]:
             (self.root / "src-tauri/icons" / name).write_bytes(b"fixture icon")
+        service = self.root / "src-tauri/resources/sub-store"
+        (service / "darwin-x64").mkdir(parents=True, exist_ok=True)
+        self.service_files = {"sub-store.bundle.cjs": b"fixture service",
+                              "service-bootstrap.cjs": b"fixture bootstrap",
+                              "build-provenance.json": b"{}",
+                              "runtime-manifest.json": b"{}",
+                              "darwin-x64/node": bytes(binary("macos", "x86_64")),
+                              "darwin-x64/LICENSE": b"fixture license"}
+        for name, content in self.service_files.items():
+            (service / name).write_bytes(content)
+        (service / "darwin-x64/node").chmod(0o755)
+        manifest = {"schemaVersion": 1, "engineVersion": "2.44.16", "nodeVersion": "24.18.0", "target": "darwin-x64",
+                    "files": [{"path": name, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                              for name, content in self.service_files.items()]}
+        (service / "darwin-x64/manifest.json").write_text(json.dumps(manifest))
         bundle = self.bundle(bad=bad)
         shutil.copy2(bundle, self.root / "src-tauri/resources/kernel.zip")
         mocks = self.root / "mocks.sh"
@@ -195,6 +211,7 @@ cargo() {
     printf 'fixture executable' > "src-tauri/target/$target/ppclash"
   done
   if [ "$BUNDLE_TAMPER_ZIP" = 1 ]; then printf 'corrupt fixture' > src-tauri/resources/kernel.zip; fi
+  if [ "$BUNDLE_TAMPER_SUB_STORE" = 1 ]; then printf 'corrupt node' > src-tauri/resources/sub-store/darwin-x64/node; fi
 }
 rustup() { :; }
 lipo() { :; }
@@ -205,7 +222,7 @@ hdiutil() { touch "$BUNDLE_TEST_ROOT/dmg-started"; }
 uname() { printf 'x86_64\\n'; }
 ''')
         env = {**os.environ, "PATH": str(self.python_bin) + os.pathsep + os.environ["PATH"],
-               "BASH_ENV": str(mocks), "BUNDLE_TEST_ROOT": str(self.root), "BUNDLE_TAMPER_ZIP": "0",
+               "BASH_ENV": str(mocks), "BUNDLE_TEST_ROOT": str(self.root), "BUNDLE_TAMPER_ZIP": "0", "BUNDLE_TAMPER_SUB_STORE": "0",
                "KERNEL_ZIP_SHA256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
                "UNIVERSAL": "0", "MACOS_TARGET": "x86_64-apple-darwin", "PPCLASH_COMPILE_ONLY": "0"}
         return scripts, env
@@ -252,9 +269,77 @@ uname() { printf 'x86_64\\n'; }
         self.assertTrue((self.root / "signed").exists())
         self.assertTrue((self.root / "src-tauri/target/release/bundle/macos/PP Clash.app/Contents/Resources/resources/kernel.zip").exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX Bash fixture")
+    def test_local_bundle_keeps_complete_sub_store_resources(self):
+        scripts, env = self.local_bundle_fixture()
+        result = subprocess.run(["bash", str(scripts / "bundle.sh")], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        target = self.root / "src-tauri/target/release/bundle/macos/PP Clash.app/Contents/Resources/sub-store"
+        for name, content in self.service_files.items():
+            self.assertTrue((target / name).is_file(), f"missing bundled service resource: {name}")
+            self.assertEqual((target / name).read_bytes(), content)
+        self.assertEqual((target / "darwin-x64/manifest.json").read_bytes(),
+                         (self.root / "src-tauri/resources/sub-store/darwin-x64/manifest.json").read_bytes())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX Bash fixture")
+    def test_missing_sub_store_resources_preserve_previous_app(self):
+        scripts, env = self.local_bundle_fixture()
+        shutil.rmtree(self.root / "src-tauri/resources/sub-store")
+        previous = self.root / "Previous.app"
+        previous.mkdir()
+        (previous / "keep").write_bytes(b"previous app")
+        result = subprocess.run(["bash", str(scripts / "bundle.sh")], env={**env, "APP_PATH": str(previous)}, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((previous / "keep").read_bytes(), b"previous app")
+        self.assertFalse((self.root / "build-started").exists())
+        self.assertFalse((self.root / "signed").exists())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX Bash fixture")
+    def test_invalid_sub_store_resources_preserve_previous_app(self):
+        for failure in ["missing-node", "corrupt-bootstrap", "wrong-target", "wrong-architecture"]:
+            with self.subTest(failure=failure):
+                scripts, env = self.local_bundle_fixture()
+                source = self.root / "src-tauri/resources/sub-store"
+                manifest_path = source / "darwin-x64/manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                if failure == "missing-node":
+                    (source / "darwin-x64/node").unlink()
+                elif failure == "corrupt-bootstrap":
+                    (source / "service-bootstrap.cjs").write_bytes(b"broken")
+                elif failure == "wrong-target":
+                    manifest["target"] = "darwin-arm64"
+                    manifest_path.write_text(json.dumps(manifest))
+                else:
+                    content = bytes(binary("macos", "aarch64"))
+                    (source / "darwin-x64/node").write_bytes(content)
+                    next(row for row in manifest["files"] if row["path"] == "darwin-x64/node")["sha256"] = hashlib.sha256(content).hexdigest()
+                    manifest_path.write_text(json.dumps(manifest))
+                previous = self.root / "Previous.app"
+                previous.mkdir(exist_ok=True)
+                (previous / "keep").write_bytes(b"previous app")
+                for name in ["build-started", "signed"]:
+                    (self.root / name).unlink(missing_ok=True)
+                result = subprocess.run(["bash", str(scripts / "bundle.sh")], env={**env, "APP_PATH": str(previous)}, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((previous / "keep").read_bytes(), b"previous app")
+                self.assertFalse((self.root / "build-started").exists())
+                self.assertFalse((self.root / "signed").exists())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX Bash fixture")
+    def test_sub_store_copy_is_revalidated_before_signing(self):
+        scripts, env = self.local_bundle_fixture()
+        previous = self.root / "Previous.app"
+        previous.mkdir()
+        (previous / "keep").write_bytes(b"previous app")
+        result = subprocess.run(["bash", str(scripts / "bundle.sh")], env={**env, "APP_PATH": str(previous), "BUNDLE_TAMPER_SUB_STORE": "1"}, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((previous / "keep").read_bytes(), b"previous app")
+        self.assertFalse((self.root / "signed").exists())
+
     @unittest.skipIf(sys.platform == "win32", "本地 macOS bundle 的纯 Bash mock")
     def test_compile_only_never_packages_or_signs_and_dmg_refuses_it(self):
         scripts, env = self.local_bundle_fixture("placeholder")
+        shutil.rmtree(self.root / "src-tauri/resources/sub-store")
         env.update({"PPCLASH_COMPILE_ONLY": "1", "UNIVERSAL": "1", "KERNEL_ZIP_SHA256": ""})
         result = subprocess.run(["bash", str(scripts / "bundle.sh")], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

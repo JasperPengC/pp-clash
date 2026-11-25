@@ -20,14 +20,17 @@ export function createStatePersistence(port: {
   write(payload: string, session?: string): Promise<void>;
   report(error: unknown): void;
 }) {
-  return async (s: PersistedState): Promise<void> => {
-    if (!port.allowed()) return;
+  return async (s: PersistedState, strict = false): Promise<void> => {
+    if (!port.allowed()) {
+      if (strict) throw new Error('状态正在恢复，暂时无法保存');
+      return;
+    }
     const payload = JSON.stringify({
       profiles: s.profiles, activeId: s.activeId, policy: s.policy, settings: s.settings,
       tunEnabled: s.tunEnabled, sysProxyEnabled: s.sysProxyEnabled,
       pinnedNodes: s.pinnedNodes, fixedNodes: s.fixedNodes, selectedNodes: s.selectedNodes,
     });
     try { await port.write(payload, s.persistenceSession); }
-    catch (error) { port.report(error); }
+    catch (error) { port.report(error); if (strict) throw error; }
   };
 }

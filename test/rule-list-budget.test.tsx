@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RulesPage } from '../src/pages/Rules';
 import { useApp } from '../src/store/app';
+import { useViewPreferences } from '../src/store/view-preferences';
 import { api } from '../src/core/api';
 vi.mock('../src/core/api', async original => {
   const actual = await original<typeof import('../src/core/api')>();
@@ -12,6 +13,7 @@ vi.mock('../src/core/api', async original => {
 let host: HTMLDivElement; let root: Root;
 const initial = useApp.getInitialState();
 beforeEach(() => {
+  useViewPreferences.setState(useViewPreferences.getInitialState(), true);
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   useApp.setState({ ...initial, kernelPhase: 'running', connectedAt: 1, notify: vi.fn() });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);

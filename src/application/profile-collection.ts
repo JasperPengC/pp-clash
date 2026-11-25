@@ -1,6 +1,7 @@
 import type { Profile, CollectionRecipe } from '../domain/app';
 import { processCollection } from '../core/sub-store/client';
 import { api } from '../core/api';
+import { downloadSubStoreProfile } from '../core/sub-store/download';
 
 export function collectionSources(profiles: Profile[], recipe: CollectionRecipe) {
   if (!Array.isArray(recipe.sources) || recipe.sources.length < 2 || recipe.sources.length > 32
@@ -20,7 +21,8 @@ export async function buildCollection(sources: Profile[], recipe: CollectionReci
     if (fresh) {
       if (p.sourceType === 'file' && !p.url) throw new Error('请先为来源订阅关联本机文件');
       try {
-        raw = p.sourceType === 'file' ? await api.readSubscriptionFile(p.url)
+        raw = p.sourceType === 'substore' && p.subStore ? await downloadSubStoreProfile(p.subStore, p.useProxy ? port : undefined)
+          : p.sourceType === 'file' ? await api.readSubscriptionFile(p.url)
           : (await api.fetchSubscription(p.url, p.useProxy ? port : undefined)).raw;
       } catch { throw new Error(`无法更新来源「${p.name}」`); }
     }

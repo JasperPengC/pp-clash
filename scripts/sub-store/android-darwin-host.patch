@@ -1,0 +1,91 @@
+--- a/deps/uv/uv.gyp
++++ b/deps/uv/uv.gyp
+@@ -270,7 +270,7 @@
+             '-fno-strict-aliasing',
+           ],
+         }],
+-        [ 'OS in "mac ios"', {
++        [ 'OS in "mac ios" or (_toolset=="host" and host_os=="mac")', {
+           'sources': [
+             '<@(uv_sources_apple)',
+           ],
+@@ -288,7 +288,7 @@
+             'libraries': [ '-ldl', '-lrt' ],
+           },
+         }],
+-        [ 'OS=="android"', {
++        [ 'OS=="android" and not (_toolset=="host" and host_os=="mac")', {
+           'defines': [
+             '_GNU_SOURCE',
+           ],
+@@ -392,7 +392,7 @@
+             'src/unix/bsd-proctitle.c'
+           ],
+         }],
+-        [ 'OS in "ios mac freebsd dragonflybsd openbsd netbsd".split()', {
++        [ 'OS in "ios mac freebsd dragonflybsd openbsd netbsd".split() or (_toolset=="host" and host_os=="mac")', {
+           'sources': [
+             '<@(uv_sources_bsd_common)',
+           ],
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -1136,6 +1136,19 @@
+             '<!@pymod_do_main(GN-scraper "<(V8_ROOT)/BUILD.gn"  "\\"v8_base_without_compiler.*?v8_enable_heap_snapshot_verify.*?sources \\+= ")',
+           ],
+         }],
++        ['OS=="android" and _toolset=="host" and host_os=="mac" and v8_enable_webassembly==1 and v8_target_arch in ["arm64", "x64"]', {
++          'sources': [
++            '<(V8_ROOT)/src/trap-handler/handler-inside-posix.cc',
++            '<(V8_ROOT)/src/trap-handler/handler-outside-posix.cc',
++          ],
++          'conditions': [
++            ['host_arch=="x64" and v8_target_arch=="arm64"', {
++              'sources': [
++                '<(V8_ROOT)/src/trap-handler/handler-outside-simulator.cc',
++              ],
++            }],
++          ],
++        }],
+         ['v8_target_arch=="ia32"', {
+           'sources': [
+             '<!@pymod_do_main(GN-scraper "<(V8_ROOT)/BUILD.gn"  "\\"v8_base_without_compiler.*?v8_enable_wasm_gdb_remote_debugging.*?v8_current_cpu == \\"x86.*?sources \\+= ")',
+@@ -1505,6 +1518,7 @@
+           ]
+         }],
+         ['OS == "mac" or (_toolset=="host" and host_os=="mac")', {
++          'sources!': [ '<(V8_ROOT)/src/base/platform/platform-linux.cc' ],
+           'sources': [
+             '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
+             '<(V8_ROOT)/src/base/platform/platform-darwin.cc',
+--- a/tools/gyp/pylib/gyp/generator/make.py
++++ b/tools/gyp/pylib/gyp/generator/make.py
+@@ -1889,10 +1889,13 @@
+                 and not self.is_standalone_static_library
+             ):
+                 if self.flavor in ("linux", "android", "openharmony"):
++                    archive = "create_thin_archive"
++                    if self.toolset == "host" and self.flavor == "android" and sys.platform == "darwin":
++                        archive = "create_archive"
+                     self.WriteMakeRule(
+                         [self.output_binary],
+                         link_deps,
+-                        actions=["$(call create_thin_archive,$@,$^)"],
++                        actions=[f"$(call {archive},$@,$^)"],
+                     )
+                 else:
+                     self.WriteDoCmd(
+@@ -2518,7 +2521,13 @@
+             }
+         )
+     elif flavor == "android":
+-        header_params.update({"link_commands": LINK_COMMANDS_ANDROID})
++        commands = LINK_COMMANDS_ANDROID
++        if sys.platform == "darwin":
++            commands = commands.replace(
++                "cmd_link_host = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ -Wl,--start-group $(LD_INPUTS) -Wl,--end-group $(LIBS)",
++                "cmd_link_host = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(LD_INPUTS) $(LIBS)",
++            )
++        header_params.update({"link_commands": commands})
+     elif flavor == "zos":
+         copy_archive_arguments = "-fPR"
+         CC_target = GetEnvironFallback(("CC_target", "CC"), "njsc")

@@ -64,6 +64,207 @@ it('睡眠恢复跳过当前轮，重新等待网络稳定再累计', async () =
   await rounds(1); expect(puts()).toHaveLength(1);
 });
 
+it.each([60_000, 3_600_000, -60_000])('读取分组期间时钟跳变 %i ms，迟到结果不能触发探测或沿用旧失败切换', async jump => {
+  stop = startBackgroundHealth(); await rounds(2);
+  const read = vi.mocked(api.mihomo).getMockImplementation()!;
+  let finish!: () => void;
+  vi.mocked(api.mihomo).mockImplementationOnce((method, path, body) =>
+    new Promise(resolve => { finish = () => resolve(read(method, path, body)); }));
+  await rounds(1);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(2);
+  vi.setSystemTime(Date.now() + jump);
+  finish(); await vi.advanceTimersByTimeAsync(0);
+  expect(puts()).toHaveLength(0);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(2);
+  await rounds(2); expect(puts()).toHaveLength(0);
+  await rounds(1); expect(puts()).toHaveLength(1);
+});
+
+it('自动切换排队期间休眠，执行前丢弃过期候选且不进入切换冷却', async () => {
+  let finish!: () => void;
+  vi.mocked(api.mihomo).mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({}); }));
+  const manual = useApp.getState().selectNode('Main', 'A');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(puts()).toEqual([['PUT', '/proxies/Main', { name: 'A' }]]);
+  stop = startBackgroundHealth(); await rounds(3);
+  expect(api.probeNodeHealth).toHaveBeenCalledWith('B');
+  vi.setSystemTime(Date.now() + 60_000);
+  finish(); await manual; await vi.advanceTimersByTimeAsync(0);
+  expect(selected).toBe('A');
+  expect(puts()).toHaveLength(1);
+  expect(localStorage.getItem('ppclash.failoverCooldown')).toBeNull();
+  await rounds(2); expect(puts()).toHaveLength(1);
+  await rounds(1); expect(selected).toBe('B'); expect(puts()).toHaveLength(2);
+});
+
+it('前一分组探测跨越休眠，本轮不能继续探测后续分组或触发切换', async () => {
+  const read = vi.mocked(api.mihomo).getMockImplementation()!;
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    const result = await read(method, path, body);
+    if (method === 'GET' && path === '/proxies') result.proxies.Second = { ...result.proxies.Main };
+    return result;
+  });
+  useApp.setState({ routing: { primary: 'Main', managed: ['Main', 'Second'], roots: ['Main', 'Second'] } });
+  stop = startBackgroundHealth(); await rounds(2);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(4);
+  let finish!: (value: typeof failed) => void;
+  vi.mocked(api.probeNodeHealth).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  await rounds(1);
+  vi.setSystemTime(Date.now() + 60_000);
+  finish(failed); await vi.advanceTimersByTimeAsync(0);
+  expect(puts()).toHaveLength(0);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(5);
+  await rounds(2); expect(puts()).toHaveLength(0);
+  await rounds(1); expect(puts()).toHaveLength(1);
+});
+
+it('分组读取和探测合计过期，不能分别续期后自动切换', async () => {
+  stop = startBackgroundHealth(); await rounds(2);
+  const read = vi.mocked(api.mihomo).getMockImplementation()!;
+  let finishRead!: () => void;
+  let finishProbe!: (value: typeof failed) => void;
+  vi.mocked(api.mihomo).mockImplementationOnce((method, path, body) =>
+    new Promise(resolve => { finishRead = () => resolve(read(method, path, body)); }));
+  vi.mocked(api.probeNodeHealth).mockImplementationOnce(() => new Promise(resolve => { finishProbe = resolve; }));
+  await rounds(1);
+  vi.setSystemTime(Date.now() + 30_000);
+  finishRead(); await vi.advanceTimersByTimeAsync(0);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(3);
+  vi.setSystemTime(Date.now() + 20_000);
+  finishProbe(failed); await vi.advanceTimersByTimeAsync(0);
+  expect(puts()).toHaveLength(0);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(3);
+});
+
+it('丢弃迟到结果后等待完整稳定间隔，期间不补发或重叠探测', async () => {
+  stop = startBackgroundHealth(); await rounds(2);
+  const read = vi.mocked(api.mihomo).getMockImplementation()!;
+  let finish!: () => void;
+  vi.mocked(api.mihomo).mockImplementationOnce((method, path, body) =>
+    new Promise(resolve => { finish = () => resolve(read(method, path, body)); }));
+  await rounds(1);
+  await vi.advanceTimersByTimeAsync(180_000);
+  finish(); await vi.advanceTimersByTimeAsync(0);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(119_999);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(3);
+  expect(puts()).toHaveLength(0);
+});
+
+it('停止控制层后迟到结果不探测、不切换，也不重新调度', async () => {
+  stop = startBackgroundHealth(); await rounds(2);
+  const read = vi.mocked(api.mihomo).getMockImplementation()!;
+  let finish!: () => void;
+  vi.mocked(api.mihomo).mockImplementationOnce((method, path, body) =>
+    new Promise(resolve => { finish = () => resolve(read(method, path, body)); }));
+  await rounds(1);
+  stop(); stop = undefined;
+  vi.setSystemTime(Date.now() + 60_000);
+  finish(); await vi.advanceTimersByTimeAsync(0);
+  const reads = vi.mocked(api.mihomo).mock.calls.length;
+  await rounds(10);
+  expect(api.mihomo).toHaveBeenCalledTimes(reads);
+  expect(api.probeNodeHealth).toHaveBeenCalledTimes(2);
+  expect(puts()).toHaveLength(0);
+});
+
+it('多个分组正常慢探测不会让末尾出口饿死或清空连续失败', async () => {
+  const names = Array.from({ length: 8 }, (_, i) => `Group${i}`);
+  const selections = Object.fromEntries(names.map((name, i) => [name, `A${i}`]));
+  useApp.setState({ routing: { primary: names[0], managed: names, roots: names } });
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    if (method === 'PUT') { selections[path.slice('/proxies/'.length)] = (body as { name: string }).name; return {}; }
+    if (path !== '/proxies') throw new Error(`unexpected ${method} ${path}`);
+    return { proxies: Object.fromEntries([
+      ...names.map((name, i) => [name, { type: 'Selector', now: selections[name], all: [`A${i}`, 'B'] }]),
+      ...[...names.map((_, i) => `A${i}`), 'B'].map(name => [name, { type: 'Shadowsocks' }]),
+    ]) };
+  });
+  vi.mocked(api.probeNodeHealth).mockImplementation(async node => {
+    vi.setSystemTime(Date.now() + 7000);
+    return node === 'A7' ? failed : healthy;
+  });
+  stop = startBackgroundHealth();
+  await rounds(1);
+  expect(api.probeNodeHealth).toHaveBeenCalledWith('A7');
+  await rounds(1); expect(puts()).toHaveLength(0);
+  await rounds(1);
+  expect(puts()).toEqual([['PUT', '/proxies/Group7', { name: 'B' }]]);
+  expect(selections.Group7).toBe('B');
+});
+
+it.each([5, 16])('后组共享当前坏节点且有 %i 个中间组时，正常慢探测仍能累计故障切换', async count => {
+  const names = ['First', ...Array.from({ length: count }, (_, i) => `Middle${i}`), 'Last'];
+  const nodes = ['A', ...Array.from({ length: count }, (_, i) => `N${i}`), 'A'];
+  const selections = Object.fromEntries(names.map((name, i) => [name, nodes[i]]));
+  useApp.setState({ routing: { primary: names[0], managed: names, roots: names } });
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    if (method === 'PUT') { selections[path.slice('/proxies/'.length)] = (body as { name: string }).name; return {}; }
+    if (path !== '/proxies') throw new Error(`unexpected ${method} ${path}`);
+    return { proxies: Object.fromEntries([
+      ...names.map(name => [name, { type: 'Selector', now: selections[name], all: name === 'Last' ? ['A', 'B'] : [selections[name]] }]),
+      ...[...nodes, 'B'].map(name => [name, { type: 'Shadowsocks' }]),
+    ]) };
+  });
+  vi.mocked(api.probeNodeHealth).mockImplementation(async node => {
+    vi.setSystemTime(Date.now() + 7000);
+    return node === 'A' ? failed : healthy;
+  });
+  stop = startBackgroundHealth(); await rounds(3);
+  expect(puts()).toEqual([['PUT', '/proxies/Last', { name: 'B' }]]);
+  expect(selections.Last).toBe('B');
+});
+
+it('后续分组独立检测共享节点，不复用先前结果', async () => {
+  const names = Array.from({ length: 8 }, (_, i) => `Group${i}`);
+  const nodes = ['A', 'N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'A'];
+  useApp.setState({ routing: { primary: names[0], managed: names, roots: names } });
+  vi.mocked(api.mihomo).mockImplementation(async () => ({ proxies: Object.fromEntries([
+    ...names.map((name, i) => [name, { type: 'Selector', now: nodes[i], all: [nodes[i], 'B'] }]),
+    ...[...nodes, 'B'].map(name => [name, { type: 'Shadowsocks' }]),
+  ]) }));
+  vi.mocked(api.probeNodeHealth).mockImplementation(async () => {
+    vi.setSystemTime(Date.now() + 7000);
+    return healthy;
+  });
+  stop = startBackgroundHealth(); await rounds(1);
+  expect(vi.mocked(api.probeNodeHealth).mock.calls.filter(([node]) => node === 'A')).toHaveLength(2);
+  expect(puts()).toHaveLength(0);
+});
+
+it('后组重新验证共享候选，旧组结果过期不妨碍本组有效排队执行', async () => {
+  const names = ['First', 'Middle1', 'Middle2', 'Middle3', 'Middle4', 'Last'];
+  const nodes = ['B', 'N1', 'N2', 'N3', 'N4', 'A'];
+  const selections = Object.fromEntries(names.map((name, i) => [name, nodes[i]]));
+  useApp.setState({ routing: { primary: names[0], managed: names, roots: names } });
+  vi.mocked(api.mihomo).mockImplementation(async (method, path, body) => {
+    if (method === 'PUT') { selections[path.slice('/proxies/'.length)] = (body as { name: string }).name; return {}; }
+    if (path !== '/proxies') throw new Error(`unexpected ${method} ${path}`);
+    return { proxies: Object.fromEntries([
+      ...names.map(name => [name, { type: 'Selector', now: selections[name], all: [selections[name], 'B'] }]),
+      ...nodes.map(name => [name, { type: 'Shadowsocks' }]),
+    ]) };
+  });
+  await useApp.getState().refreshGroups();
+  let finish!: () => void;
+  vi.mocked(api.mihomo).mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({}); }));
+  const manual = useApp.getState().selectNode('Last', 'A');
+  await vi.advanceTimersByTimeAsync(0);
+  vi.mocked(api.probeNodeHealth).mockImplementation(async node => {
+    vi.setSystemTime(Date.now() + (node === 'B' ? 2000 : node === 'A' ? 0 : 7000));
+    return node === 'A' ? failed : healthy;
+  });
+  stop = startBackgroundHealth(); await rounds(3);
+  expect(vi.mocked(api.probeNodeHealth).mock.calls.filter(([node]) => node === 'B')).toHaveLength(4);
+  vi.setSystemTime(Date.now() + 20_000);
+  finish(); await manual; await vi.advanceTimersByTimeAsync(0);
+  expect(puts()).toEqual([['PUT', '/proxies/Last', { name: 'A' }], ['PUT', '/proxies/Last', { name: 'B' }]]);
+  expect(selections.Last).toBe('B');
+  expect(Number(localStorage.getItem('ppclash.failoverCooldown'))).toBeGreaterThan(Date.now());
+});
+
 it('候选检测期间手动选择其他节点，旧结果不能反向覆盖', async () => {
   let finish!: (value: typeof healthy) => void;
   vi.mocked(api.probeNodeHealth).mockImplementation(node => node === 'A' ? Promise.resolve(failed) : new Promise(r => { finish = r; }));

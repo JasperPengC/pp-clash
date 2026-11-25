@@ -50,13 +50,16 @@ app.*.map.json
 # PP Clash project
 node_modules/
 dist/
-src-tauri/target
+**/target
 PP Clash.app/
 *.app/
 legacy/
 .metadata
 src-tauri/resources/kernel.zip
 src-tauri/resources/kernel.zip.sha256
+# Prepared Sub-Store packages are generated; keep the source bootstrap in place.
+/src-tauri/resources/sub-store/*
+!/src-tauri/resources/sub-store/service-bootstrap.cjs
 src-tauri/android-core/mobile/geodata.zip
 *.log
 

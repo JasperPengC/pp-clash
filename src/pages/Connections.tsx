@@ -1,5 +1,6 @@
 import { PageHeader } from '../components/PageHeader';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { usePageQuery, useViewPreference } from '../store/view-preferences';
 import { EmptyState, PageLink, ReadError, Segmented, Spinner } from '../components/ui';
 import {
   IconActivity,
@@ -63,12 +64,12 @@ export function ConnectionsPage({ active = true }: { active?: boolean }) {
   const available = useRef(active && connected);
   available.current = active && connected;
   const [closing, setClosing] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = usePageQuery('connections');
   const deferredQuery = useDeferredValue(query);
-  const [sortBy, setSortBy] = useState<'time' | 'down' | 'up'>('time');
+  const [sortBy, setSortBy] = useViewPreference('connectionSort');
   const [closingAll, setClosingAll] = useState(false);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
-  const [view, setView] = useState<'conn' | 'process'>('conn');
+  const [view, setView] = useViewPreference('connectionView');
   const [expandedProcess, setExpandedProcess] = useState<string | null>(null);
   const [closingProcess, setClosingProcess] = useState<string | null>(null);
   const [confirmProcess, setConfirmProcess] = useState<string | null>(null);

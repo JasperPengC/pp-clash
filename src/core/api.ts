@@ -36,8 +36,39 @@ export interface KernelStatus {
 }
 
 export interface WebDavConnection { endpoint: string; username: string; password: string }
-export interface WebDavBackupPreview { device: string; profiles: number; collections: number; digest: string }
+export interface WebDavBackupPreview { device: string; profiles: number; collections: number; subStoreEntries?: number; digest: string }
 export interface WebDavRestore { connection: WebDavConnection; name: string; digest: string; passphrase: string }
+
+export interface WebDavSettings {
+  endpoint: string;
+  /** 规范化的相对目录，百分号编码仅一层。 */
+  directory: string;
+  username: string;
+  deviceName: string;
+  schedule: 'off' | 'daily' | 'weekly';
+  retention: number;
+}
+export type WebDavCredentialChange = { intent: 'keep' } | { intent: 'replace'; value: string } | { intent: 'clear' };
+export interface WebDavSettingsSnapshot {
+  settings: WebDavSettings;
+  deviceId: string | null;
+  configured: boolean;
+  /** null 表示凭据库当前不可读，不能显示成“未保存”。 */
+  hasPassword: boolean | null;
+  hasBackupPassphrase: boolean | null;
+  credentialStore: {
+    backend: 'macosKeychain' | 'windowsCredentialManager' | 'linuxSecretService' | 'unsupported';
+    status: 'available' | 'unavailable' | 'unsupported';
+  };
+}
+export interface WebDavSaveRequest {
+  settings: WebDavSettings;
+  password: WebDavCredentialChange;
+  backupPassphrase: WebDavCredentialChange;
+}
+export interface WebDavTestRequest { settings: WebDavSettings; password: WebDavCredentialChange }
+export interface WebDavConnectionTestResult { directoryExists: boolean; willCreateOnBackup: boolean }
+export interface WebDavSettingsError { code: string; message: string }
 
 export interface TrayNode {
   name: string;
@@ -599,7 +630,9 @@ export const api = {
 
   /** 内置 Geo 资源文件状态。 */
   listResourceFiles: () =>
-    call<Array<{ name: string; size: number; exists: boolean }>>('list_resource_files'),
+    call<Array<{ name: string; size: number; exists: boolean; aliasOf?: string; sourceUrl?: string }>>('list_resource_files'),
+
+  geoAutoUpdateStatus: () => call<{ enabled: boolean; intervalHours: number; lastSuccessAt: number | null; lastAttemptAt: number | null; nextDueAt: number | null; error: string | null }>('geo_auto_update_status'),
 
   /** 按需读取适用于当前平台、可校验的官方稳定版本。 */
   listKernelReleases: (proxyUrl?: string, page = 1) =>
@@ -631,6 +664,9 @@ export const api = {
 
   /** 备份当前 state.json 到数据目录 backups/。 */
   backupAppState: (dataDir: string) => call<string>('backup_app_state', { dataDir }),
+  getWebDavSettings: () => call<WebDavSettingsSnapshot>('get_webdav_settings'),
+  saveWebDavSettings: (request: WebDavSaveRequest) => call<WebDavSettingsSnapshot>('save_webdav_settings', { request }),
+  testWebDavConnection: (request: WebDavTestRequest) => call<WebDavConnectionTestResult>('test_webdav_connection', { request }),
   webdavList: (connection: WebDavConnection) => call<string[]>('webdav_list', { connection }),
   webdavUpload: (connection: WebDavConnection, passphrase: string, device: string) =>
     call<string>('webdav_upload', { connection, passphrase, device }),

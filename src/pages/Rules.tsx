@@ -1,6 +1,7 @@
 import { PageHeader } from '../components/PageHeader';
 import { VirtualList } from '../components/VirtualList';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { usePageQuery, useViewPreference } from '../store/view-preferences';
 import { EmptyState, MiniSwitch, ReadError, Segmented, Select, Spinner } from '../components/ui';
 import { IconChevronDown, IconDownload, IconEdit, IconImport, IconInfo, IconPlus, IconRefresh, IconRules, IconSearch, IconTrash, IconX } from '../components/icons';
 import { isAndroid } from '../core/platform';
@@ -61,8 +62,8 @@ export function RulesPage() {
   const kernelRequest = useRef(0);
   const kernelReading = useRef(false);
   const mutationBusy = useRef(false);
-  const [query, setQuery] = useState('');
-  const [ruleView, setRuleView] = useState<'custom' | 'subscription' | 'effective'>('custom');
+  const [query, setQuery] = usePageQuery('rules');
+  const [ruleView, setRuleView] = useViewPreference('ruleView');
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [type, setType] = useState('DOMAIN-SUFFIX');
@@ -73,7 +74,7 @@ export function RulesPage() {
 
   const [showIO, setShowIO] = useState(false);
   const [ioText, setIoText] = useState('');
-  const [subQuery, setSubQuery] = useState('');
+  const [subQuery, setSubQuery] = usePageQuery(JSON.stringify(['subscription-rules', activeId]));
   const deferredQuery = useDeferredValue(query);
   const deferredSubQuery = useDeferredValue(subQuery);
   const [ruleSaving, setRuleSaving] = useState(false);
