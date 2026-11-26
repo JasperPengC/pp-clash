@@ -17,10 +17,20 @@ NODE = shutil.which('node')
 class AndroidRuntimePortabilityTests(unittest.TestCase):
     def import_runtime_tests(self, setup='', env=None):
         code = f'''
-import importlib.util, json, os, subprocess, sys
+import builtins, importlib.util, json, os, sys, types
+# Scope the simulated platform to the target module; standard-library imports
+# must keep the real host platform (Python 3.12 shutil imports _winapi on Windows).
+host_import = builtins.__import__
+os = types.SimpleNamespace(**vars(os))
+sys = types.SimpleNamespace(**vars(sys))
 {setup}
+def target_import(name, *args, **kwargs):
+    if name == 'os': return os
+    if name == 'sys': return sys
+    return host_import(name, *args, **kwargs)
 spec = importlib.util.spec_from_file_location('android_runtime_tests', {str(RUNTIME_TESTS)!r})
 module = importlib.util.module_from_spec(spec)
+module.__dict__['__builtins__'] = {{**vars(builtins), '__import__': target_import}}
 spec.loader.exec_module(module)
 tests = module.AndroidNodeRuntimeTests
 print(json.dumps({{'node': module.NODE, 'classSkipped': bool(getattr(tests, '__unittest_skip__', False)),
@@ -31,14 +41,8 @@ print(json.dumps({{'node': module.NODE, 'classSkipped': bool(getattr(tests, '__u
                               capture_output=True, env=env)
 
     def test_windows_without_uname_skips_builds_and_keeps_artifact_checks(self):
-        with tempfile.TemporaryDirectory() as directory:
-            env = os.environ.copy()
-            if NODE and sys.platform != 'win32':
-                (Path(directory) / 'node.exe').symlink_to(NODE)
-                env['PATH'] = directory + os.pathsep + env.get('PATH', '')
-                env['PATHEXT'] = '.exe'
-            result = self.import_runtime_tests(
-                "if hasattr(os, 'uname'): del os.uname\nsys.platform = 'win32'", env=env)
+        result = self.import_runtime_tests(
+            "if hasattr(os, 'uname'): del os.uname\nsys.platform = 'win32'")
         self.assertEqual(result.returncode, 0, result.stderr)
         value = json.loads(result.stdout)
         if NODE:

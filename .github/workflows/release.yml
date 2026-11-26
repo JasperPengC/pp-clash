@@ -44,6 +44,9 @@ jobs:
         with:
           go-version: '1.27.4'
           cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Check source and workflow gates before starting builders
         run: ./scripts/ci.sh preflight
       - name: Verify Android signing before starting builders

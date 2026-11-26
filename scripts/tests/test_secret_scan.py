@@ -1,6 +1,7 @@
 """使用临时 Git 候选文件验证敏感信息门禁，断言输出从不包含秘密值。"""
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -28,7 +29,8 @@ class SecretScanTests(unittest.TestCase):
         return path
 
     def scan(self, cwd=None):
-        return subprocess.run(["bash", str(SCRIPT)], cwd=cwd or self.root,
+        # Resolve PATH ourselves so Windows does not prefer System32's WSL Bash.
+        return subprocess.run([shutil.which("bash") or "bash", SCRIPT.as_posix()], cwd=cwd or self.root,
                               capture_output=True, text=True)
 
     def test_untracked_source_secret_is_rejected_with_line_only_and_without_staging(self):

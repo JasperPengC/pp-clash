@@ -143,10 +143,10 @@ class PublicFilesTests(unittest.TestCase):
                   "scripts/sub-store/prepare-runtime.cjs", "scripts/sub-store/runtime-lock.json"]
         for name in ignored + public:
             self.write(name)
-        result = subprocess.run(["git", "check-ignore", "--stdin"], cwd=self.root,
-                                input="\n".join(ignored + public) + "\n",
-                                capture_output=True, text=True)
-        self.assertEqual(set(result.stdout.splitlines()), set(ignored))
+        result = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=self.root,
+                                input=("\0".join(ignored + public) + "\0").encode(),
+                                capture_output=True)
+        self.assertEqual(set(result.stdout.decode().rstrip("\0").split("\0")), set(ignored))
         self.git("add", "-f", "src-tauri/resources/sub-store/darwin-x64/node")
         rejected = self.check()
         self.assertNotEqual(rejected.returncode, 0)

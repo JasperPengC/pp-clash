@@ -23,8 +23,8 @@ const item = lock.targets[target];
 const output = path.join(root, 'src-tauri/resources/sub-store');
 const cache = path.join(root, '.cache/sub-store-runtime');
 const sha = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const run = (cmd, argv) => {
-  const result = spawnSync(cmd, argv, { stdio: 'inherit' });
+const run = (cmd, argv, options = {}) => {
+  const result = spawnSync(cmd, argv, { stdio: 'inherit', ...options });
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${cmd} failed`);
 };
@@ -40,9 +40,16 @@ try {
   if (item.archive.endsWith('.zip')) {
     if (process.platform === 'win32') {
       const quote = (value) => `'${value.replace(/'/g, "''")}'`;
-      run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath ${quote(archive)} -DestinationPath ${quote(stage)}`]);
+      // Let Windows PowerShell discover its own compatible modules instead of
+      // inheriting a PowerShell 7 module path through Node or another parent.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'PSMODULEPATH'));
+      run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath ${quote(archive)} -DestinationPath ${quote(stage)}`], { env });
     } else run('unzip', ['-q', archive, '-d', stage]);
-  } else run('tar', ['-xzf', archive, '-C', stage]);
+  } else {
+    // Git for Windows tar treats a drive-letter colon in an absolute archive
+    // path as a remote host separator. Both paths are relative to this cache.
+    run('tar', ['-xzf', path.basename(archive), '-C', path.basename(stage)], { cwd: cache });
+  }
   const extracted = path.join(stage, `node-v${lock.version}-${target}`);
   const executable = target.startsWith('win-') ? 'node.exe' : 'node';
   const binary = path.join(extracted, executable === 'node' ? 'bin/node' : executable);

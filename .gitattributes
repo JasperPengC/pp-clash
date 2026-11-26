@@ -1,0 +1,4 @@
+# Patch bytes participate in build provenance and must match on every host.
+*.patch text eol=lf
+# Shell entry points are also executed by Git Bash on Windows.
+*.sh text eol=lf

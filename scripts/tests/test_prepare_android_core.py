@@ -34,7 +34,7 @@ class PrepareAndroidCoreTests(unittest.TestCase):
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
             original, patched = 'original fixture\n', 'patched fixture\n'
-            path.write_text(original)
+            path.write_bytes(original.encode())
             files[name] = {'sourceSha256': hashlib.sha256(original.encode()).hexdigest(),
                            'patchedSha256': hashlib.sha256(patched.encode()).hexdigest()}
             parts.extend(difflib.unified_diff(original.splitlines(True), patched.splitlines(True),

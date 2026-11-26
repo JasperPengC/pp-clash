@@ -11,6 +11,7 @@ import tempfile
 import tarfile
 import threading
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,6 +72,79 @@ class SharedEnginePreparationTests(unittest.TestCase):
                 result = self.prepare(root)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((output / 'sub-store.bundle.cjs').exists())
+
+    def test_windows_checkout_preserves_linux_engine_patch_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            paths = ['scripts/sub-store', 'src-tauri/resources/sub-store/service-bootstrap.cjs']
+            attributes = ROOT / '.gitattributes'
+            if attributes.exists():
+                shutil.copyfile(attributes, root / '.gitattributes')
+                paths.append('.gitattributes')
+            for arguments in (['init', '--quiet'],
+                              ['-c', 'core.autocrlf=false', 'add', '--', *paths]):
+                subprocess.run(['git', *arguments], cwd=root, check=True,
+                               text=True, capture_output=True)
+            (root / 'scripts/sub-store/strict-errors.patch').unlink()
+            subprocess.run(['git', '-c', 'core.autocrlf=true', 'checkout-index', '--all', '--force'],
+                           cwd=root, check=True, text=True, capture_output=True)
+            result = self.prepare(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def zip_fixture(self, root, corrupt=False):
+        self.fixture(root)
+        cache = root / '.cache/sub-store-runtime'
+        cache.mkdir(parents=True)
+        archive = cache / 'node-v24.18.0-win-x64.zip'
+        binary = b'MZ fixture runtime\r\n'
+        if corrupt:
+            archive.write_bytes(b'invalid zip archive')
+        else:
+            with zipfile.ZipFile(archive, 'w') as package:
+                package.writestr('node-v24.18.0-win-x64/node.exe', binary)
+                package.writestr('node-v24.18.0-win-x64/LICENSE', b'fixture license')
+        lock_path = root / 'scripts/sub-store/runtime-lock.json'
+        lock = json.loads(lock_path.read_text())
+        lock['targets']['win-x64']['sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        lock_path.write_text(json.dumps(lock))
+        return binary
+
+    def test_windows_zip_extracts_with_inherited_powershell_module_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime's source"
+            binary = self.zip_fixture(root)
+            # Model an intermediate process inheriting PowerShell 7 module paths
+            # that are unusable by the Windows PowerShell extraction child.
+            env = {key: value for key, value in os.environ.items() if key.upper() != 'PSMODULEPATH'}
+            modules = root / 'incompatible-powershell-modules'
+            module = modules / 'Microsoft.PowerShell.Archive/Microsoft.PowerShell.Archive.psm1'
+            module.parent.mkdir(parents=True)
+            module.write_text("function Expand-Archive { Write-Error 'Inherited module is incompatible' }\n"
+                              "Export-ModuleMember -Function Expand-Archive\n")
+            env['PsModulePath'] = str(modules)
+            result = subprocess.run(['node', 'scripts/sub-store/prepare-runtime.cjs',
+                                     '--target', 'win-x64', '--offline'],
+                                    cwd=root, env=env, text=True, errors='replace', capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = root / 'src-tauri/resources/sub-store/win-x64'
+            self.assertEqual((output / 'node.exe').read_bytes(), binary)
+            manifest = json.loads((output / 'manifest.json').read_text())
+            record = next(row for row in manifest['files'] if row['path'] == 'win-x64/node.exe')
+            self.assertEqual(record['sha256'], hashlib.sha256(binary).hexdigest())
+            self.assertFalse(list((root / '.cache/sub-store-runtime').glob('prepare-*')))
+
+    def test_corrupt_windows_zip_fails_at_extraction_without_publishing_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.zip_fixture(root, corrupt=True)
+            result = subprocess.run(['node', 'scripts/sub-store/prepare-runtime.cjs',
+                                     '--target', 'win-x64', '--offline'],
+                                    cwd=root, text=True, errors='replace', capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('powershell.exe failed' if os.name == 'nt' else 'unzip failed', result.stderr)
+            self.assertFalse((root / 'src-tauri/resources/sub-store/win-x64/manifest.json').exists())
+            self.assertFalse(list((root / '.cache/sub-store-runtime').glob('prepare-*')))
 
     def test_interrupted_archive_download_resumes_before_checksum_and_extraction(self):
         with tempfile.TemporaryDirectory() as directory:
