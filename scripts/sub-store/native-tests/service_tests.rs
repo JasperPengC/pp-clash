@@ -347,7 +347,12 @@ fn fixture_resources(dir: &Path, replace: impl FnOnce(String) -> String) -> Path
             .unwrap();
     for file in manifest["files"].as_array().unwrap() {
         let name = file["path"].as_str().unwrap();
-        fs::hard_link(source.join(name), destination.join(name)).unwrap();
+        let original = source.join(name);
+        let fixture = destination.join(name);
+        // CI checkout and temporary directories can live on different volumes.
+        fs::hard_link(&original, &fixture)
+            .or_else(|_| fs::copy(&original, &fixture).map(|_| ()))
+            .unwrap();
     }
     let bootstrap = destination.join("service-bootstrap.cjs");
     let updated = replace(fs::read_to_string(&bootstrap).unwrap());
@@ -398,11 +403,19 @@ async fn bind_collision_and_readiness_failure_fail_closed_and_allow_retry() {
 #[test]
 fn resource_tampering_and_snapshot_limits_are_rejected() {
     let fixture = tempfile::tempdir().unwrap();
+    let source = resource_root();
+    let original_bootstrap = fs::read(source.join("service-bootstrap.cjs")).unwrap();
     let root = fixture_resources(fixture.path(), |s| s);
+    assert!(resources::verify(&root).is_ok());
     let bootstrap = root.join("service-bootstrap.cjs");
     fs::remove_file(&bootstrap).unwrap();
     fs::write(bootstrap, "altered").unwrap();
     assert!(resources::verify(&root).is_err());
+    assert_eq!(
+        fs::read(source.join("service-bootstrap.cjs")).unwrap(),
+        original_bootstrap
+    );
+    assert!(resources::verify(&source).is_ok());
     let value = json!({"schemaVersion":1,"engineVersion":VERSION,"files":{"root.json":{},"sub-store.json":{"settings":{},"unknown": "x".repeat(MAX_SNAPSHOT)}}});
     assert!(validate_snapshot(&value).unwrap_err().contains("大小限制"));
     assert!(validate_request(&request(
