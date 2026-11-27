@@ -25,11 +25,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/showcase-dark.webp">
-    <img src="assets/readme/showcase-light.webp" width="1120" alt="MacBook 与 Android 手机同屏展示 PP Clash，呈现桌面工作台和移动端连接控制">
+    <img src="assets/readme/showcase-light.webp" width="1120" alt="PP Clash 0.2.4 桌面与 Android 概览，展示 Sub-Store 入口、当前节点和流量曲线">
   </picture>
 </p>
 
-<p align="center"><sub>桌面与 Android 同屏展示 · 真实应用界面，使用演示数据。</sub></p>
+<p align="center"><sub>0.2.4 桌面与 Android 界面 · 从应用开发预览截取，使用演示数据与绘制的设备外框。</sub></p>
 
 ## 功能
 
@@ -48,6 +48,15 @@ WebDAV 服务器密码与备份口令分别设置。请妥善保存备份口令�
 为手机重新安排操作：看一眼当前节点，点延迟圆环测速，用大按钮连接。实时流量始终可见，订阅的更新、编辑和切换也都放在顺手的位置。分流数据库随应用内置，首次导入订阅无需额外下载。
 
 Android 同样提供 Sub-Store、WebDAV 加密备份与恢复、分流资源更新，并通过 Android Keystore 保存凭据。
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/android-dark.webp">
+    <img src="assets/readme/android-light.webp" width="620" alt="PP Clash 0.2.4 Android 概览与订阅管理，展示连接控制、用量、到期时间及订阅快捷操作">
+  </picture>
+</p>
+
+<p align="center"><sub>Android 概览与订阅管理 · 开发预览界面，使用演示数据。</sub></p>
 
 **支持 Android 7.0 及以上的 64 位设备。** ARM64 已在 Android 13 手机上验证；x86_64 已在 Android 15 模拟器验证。两种测试环境均使用 4 KiB 内存页；Android 7.0 和 16 KiB 页设备目前只有构建与对齐检查，尚无运行验证。
 
@@ -79,6 +88,8 @@ Linux 需要 WebKitGTK 4.1 和 Ayatana AppIndicator。AppImage 仍使用系统�
 
 Android 更新需要使用相同正式证书签名的安装包。本地测试 APK 使用另一张证书，不能覆盖正式版；切换渠道前请先保存订阅和配置。
 
+正式版 0.2.3 → 0.2.4 覆盖升级已在 x86_64 模拟器验证，订阅和备份设置均保留。本次变更见 [0.2.4 发布说明](https://github.com/JasperPengC/pp-clash/releases/tag/v0.2.4)。
+
 ## 安全防护
 
 DNS 与 WebRTC 防护已纳入默认配置：启用加密 DNS、按规则解析和 Fake-IP，并关闭 IPv6。规则模式下还会加入 STUN 阻断规则。桌面端安全页面可以检查当前运行中的 DNS 与 STUN 设置，并在应用内检测 WebRTC 候选。
@@ -91,7 +102,9 @@ Sub-Store 处理脚本在本地 Node.js 服务中运行，具有文件和网络�
 
 构建工具链使用 Node.js 24.18.0、Go 1.27.4、Rust 1.100.0 和 JDK 17。发布前运行 `bash scripts/ci.sh preflight`，检查版本、公开文件、敏感信息、工作流和离线构建测试。
 
-CI 从固定源码和依赖锁重建 Sub-Store 引擎，桌面测试及安装包按目标架构准备 Node.js。Android 两种架构分别从固定 Node.js 源码构建，并检查 ELF、API 级别和 16 KiB 对齐；缓存恢复后仍会校验构建输入及资源摘要。正式 Android 包还须通过签名证书校验。
+CI 从固定源码和依赖锁重建 Sub-Store 引擎，桌面测试及安装包按目标架构准备 Node.js。Android 应用构建从[产物锁文件](scripts/sub-store/android-runtime-artifacts-lock.json)下载已验证的 ARM64 与 x86_64 Node.js 运行时，无需每次发布重新编译 Node.js。下载或缓存恢复后仍会检查构建输入、资源摘要、ELF、API 级别和 16 KiB 对齐。正式 Android 包还须通过签名证书校验。
+
+需要更新该依赖时，由独立的 [Android Node 运行时依赖工作流](.github/workflows/android-runtime.yml)从固定源码构建两种运行时。依赖 Release 不会替代应用的最新版本入口。
 
 手动运行 Release 工作流默认只构建。公开发布需要匹配应用版本的 `v` 标签，并明确启用发布选项；推送版本标签也会进入发布流程。
 

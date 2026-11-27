@@ -25,11 +25,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/showcase-dark.webp">
-    <img src="assets/readme/showcase-light.webp" width="1120" alt="PP Clash on a MacBook and an Android phone together, showing the desktop workspace and mobile connection controls">
+    <img src="assets/readme/showcase-light.webp" width="1120" alt="PP Clash 0.2.4 desktop and Android overview, showing the Sub-Store entry, current node, and traffic charts">
   </picture>
 </p>
 
-<p align="center"><sub>Desktop and Android · Actual app UI with sample data.</sub></p>
+<p align="center"><sub>0.2.4 desktop and Android UI · Captured from the app's development preview with demo data; illustrated device frames.</sub></p>
 
 ## Features
 
@@ -48,6 +48,15 @@ WebDAV server passwords and backup passphrases are separate. Keep your backup pa
 A layout made for your phone: check your current node, tap the latency ring to test it, and connect with one large control. Live traffic stays in view; subscriptions have quick actions for updating, editing, and switching. Routing databases are bundled, so the first subscription import does not need to download them separately.
 
 Android includes Sub-Store, encrypted WebDAV backup and restore, routing resource updates, and credential storage through Android Keystore.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/android-dark.webp">
+    <img src="assets/readme/android-light.webp" width="620" alt="PP Clash 0.2.4 Android overview and subscriptions, showing connection controls, usage, expiry dates, and subscription actions">
+  </picture>
+</p>
+
+<p align="center"><sub>Android overview and subscriptions · Development preview with demo data.</sub></p>
 
 **Available for Android 7.0+ on 64-bit devices.** ARM64 has been tested on an Android 13 phone; x86_64 has been tested in an Android 15 emulator. Both test environments use 4 KiB memory pages. Android 7.0 and devices using 16 KiB pages have build and alignment checks, but no runtime validation yet.
 
@@ -79,6 +88,8 @@ To get started, import your subscription or local config and choose a node. On d
 
 For Android updates, use packages signed with the same release certificate. Local test APKs use a different certificate and cannot replace the official release. Save your subscriptions and configuration before switching between those channels.
 
+The official 0.2.3 → 0.2.4 upgrade has been verified in the x86_64 emulator, preserving subscriptions and backup settings. See the [0.2.4 release notes](https://github.com/JasperPengC/pp-clash/releases/tag/v0.2.4) for this release's changes.
+
 ## Security
 
 DNS and WebRTC protection are part of the default configuration: encrypted DNS, rule-aware DNS resolution, and Fake-IP, with IPv6 disabled. In Rule mode, PP Clash also adds STUN blocking rules. The desktop Security page checks the running DNS and STUN setup and can test WebRTC candidates inside the app.
@@ -91,7 +102,9 @@ Sub-Store processing scripts run in a local Node.js service with file and networ
 
 The build toolchain uses Node.js 24.18.0, Go 1.27.4, Rust 1.100.0, and JDK 17. Run `bash scripts/ci.sh preflight` before a release to check versions, public files, secrets, workflows, and offline build tests.
 
-CI rebuilds Sub-Store from pinned source and locked dependencies, then prepares Node.js for each desktop test or installer target. Android runtimes are built separately for both architectures from pinned Node.js source, with ELF, API level, and 16 KiB alignment checks. Restored builds still undergo input and resource checksum validation. Official Android packages also require release certificate verification.
+CI rebuilds Sub-Store from pinned source and locked dependencies, then prepares Node.js for each desktop test or installer target. Android application builds download the verified ARM64 and x86_64 Node.js runtimes pinned in the [artifact lock](scripts/sub-store/android-runtime-artifacts-lock.json), instead of recompiling Node.js for every release. Downloaded or cached runtimes still undergo input, resource checksum, ELF, API level, and 16 KiB alignment checks. Official Android packages also require release certificate verification.
+
+The separate [Android Node runtime dependency workflow](.github/workflows/android-runtime.yml) builds both runtimes from pinned source when that dependency needs updating. Its dependency releases do not replace the latest application release.
 
 Manual Release workflow runs build artifacts by default. Publishing requires a matching application version tag and an explicit publish option; pushing a version tag also starts the release process.
 
