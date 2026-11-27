@@ -37,6 +37,16 @@
       "elfMachine": 62
     }
   },
+  "linuxHostPatch": {
+    "path": "scripts/sub-store/android-linux-host.patch",
+    "sha256": "841e9ef9406d6933ac1223a11aef7c5b747bd319078b1ad1c16d563440f70332",
+    "files": {
+      "tools/v8_gypfiles/v8.gyp": {
+        "before": "179391dc0b29757d47a74c7ba82a53161d7b3d4aa4ba3708e6ef79eed897e922",
+        "after": "da14b6cf3e97d01494f10a14c925bdb599875038762a001d6d4cb72571d64aa7"
+      }
+    }
+  },
   "darwinPatch": {
     "path": "scripts/sub-store/android-darwin-host.patch",
     "sha256": "3ad3515d1ba28a848288cde5153917c9c0beb5a6c35ac5728a5699a026af1c41",

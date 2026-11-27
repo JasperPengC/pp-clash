@@ -1,0 +1,138 @@
+name: Android Node runtime dependency
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish verified runtime candidate assets as a non-latest prerelease
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-node-dependency-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  engine:
+    uses: ./.github/workflows/sub-store-engine.yml
+
+  build:
+    needs: engine
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: android-arm64
+            arch: aarch64
+          - target: android-x64
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check artifact reuse boundaries before the expensive source build
+        run: python3 -m unittest scripts.tests.test_android_runtime_artifacts scripts.tests.test_android_build -v
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install pinned source-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-12 g++-12 patch xz-utils
+          sdkmanager 'ndk;28.2.13676358'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sub-store-engine
+          path: .cache/cloud-tools-20261121/runtime
+      - name: Record source provenance before the cold build
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          names = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          files = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names if name}
+          manifest = {'files': files, 'sourceDigest': hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
+          (Path(os.environ['RUNNER_TEMP']) / 'runtime-source-manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
+          PY
+      - name: Build, validate and seal the complete runtime
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          node scripts/sub-store/build-android-runtime.cjs --target '${{ matrix.target }}' --host-cc gcc-12 --host-cxx g++-12 --jobs 4
+          python3 scripts/validate-sub-store-resources.py src-tauri/resources/sub-store '${{ matrix.arch }}' --platform android
+          node scripts/sub-store/build-android-runtime.cjs --target '${{ matrix.target }}' --verify-elf 'src-tauri/resources/sub-store/${{ matrix.target }}/node'
+          node scripts/sub-store/android-runtime-artifact.cjs pack --target '${{ matrix.target }}' --source-manifest "$RUNNER_TEMP/runtime-source-manifest.json" --output "$RUNNER_TEMP/android-node-${{ matrix.target }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-node-${{ matrix.target }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/android-node-${{ matrix.target }}.tar.gz
+
+  candidate:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    outputs:
+      release_tag: ${{ steps.lock.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: android-node-android-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/runtime-artifacts
+      - name: Verify both sealed runtimes and generate the candidate lock
+        id: lock
+        run: |
+          node scripts/sub-store/android-runtime-artifact.cjs lock --arm64 "$RUNNER_TEMP/runtime-artifacts/android-node-android-arm64.tar.gz" --x64 "$RUNNER_TEMP/runtime-artifacts/android-node-android-x64.tar.gz" --output "$RUNNER_TEMP/runtime-artifacts/android-runtime-artifacts-lock.json"
+          node -e 'const fs=require("node:fs");const l=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/runtime-artifacts/android-runtime-artifacts-lock.json"));console.log("release_tag="+l.releaseTag)' >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime-candidate
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/runtime-artifacts/*
+
+  publish:
+    if: inputs.publish
+    needs: candidate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-runtime-candidate
+          path: ${{ runner.temp }}/runtime-artifacts
+      - name: Publish immutable non-latest runtime dependency
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUNTIME_TAG: ${{ needs.candidate.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          gh release create "$RUNTIME_TAG" "$RUNNER_TEMP/runtime-artifacts/"* --target "$SOURCE_COMMIT" --prerelease --latest=false --title "Android Node runtime $RUNTIME_TAG" --notes 'Pinned Android Node source-build candidate. Runtime source, toolchain, ELF and license provenance are sealed in each archive. Review the generated lock and perform application/device acceptance before selecting these binaries for an application release.'

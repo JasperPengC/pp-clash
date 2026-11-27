@@ -124,6 +124,8 @@ writeFileSync(join(app, 'ppclash.pro'), `-keep class com.ppclash.app.VpnPlugin {
 -keep class com.ppclash.app.ResourceTools { *; }
 -keep class com.ppclash.app.ResourceTools$Companion { *; }
 -keep class com.ppclash.app.GeoUpdateWorker { *; }
+# Room initializes WorkManager's generated database with reflection.
+-keep class androidx.work.impl.WorkDatabase_Impl { public <init>(); }
 -keep class go.** { *; }
 -keep class mobile.** { *; }
 `);

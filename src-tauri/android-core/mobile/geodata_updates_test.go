@@ -53,6 +53,10 @@ func TestGeodataRestartUsesUpdatedMatcher(t *testing.T) {
 	if err := ensureGeodata(dir); err != nil {
 		t.Fatal(err)
 	}
+	// Config parsing initializes Mihomo's case-sensitive asset filename before loading rules.
+	if err := geodata.InitGeoSite(); err != nil {
+		t.Fatal(err)
+	}
 	oldMatcher, err := geodata.LoadGeoSiteMatcher("cn")
 	if err != nil || !oldMatcher.ApplyDomain("old-rule.example") {
 		t.Fatalf("initial rules failed: %v", err)

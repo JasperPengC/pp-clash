@@ -19,7 +19,8 @@ const readNodeConfig = (file) => JSON.parse(fs.readFileSync(file, 'utf8').replac
 function buildInput(target, host = process.platform) {
   assert.ok(Object.hasOwn(lock.targets, target), `Unsupported Android target: ${target}`);
   assert.ok(['darwin', 'linux'].includes(host), `Unsupported Android build host: ${host}`);
-  const patches = [lock.androidPatch, ...(host === 'darwin' ? [lock.darwinPatch] : [])];
+  const patches = [lock.androidPatch, ...(host === 'darwin' ? [lock.darwinPatch] : []),
+    ...(host === 'linux' ? [lock.linuxHostPatch] : [])];
   for (const patch of patches) assert.equal(fileSha(path.join(root, patch.path)), patch.sha256, 'Android source patch checksum mismatch');
   const input = {
     schemaVersion: 1, nodeVersion: lock.version, source: lock.source,

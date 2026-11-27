@@ -1,13 +1,17 @@
 """Pinned source preparation must leave production and global module files intact."""
+import contextlib
 import difflib
 import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import runpy
 import sys
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'prepare-android-core.py'
 API = runpy.run_path(str(SCRIPT))
@@ -71,11 +75,52 @@ class PrepareAndroidCoreTests(unittest.TestCase):
         self.assertEqual('production snapshot', (self.output / 'core/sentinel.txt').read_text())
         for name in API['FILES']:
             self.assertEqual('patched fixture\n', (self.output / 'mihomo' / name).read_text())
-        self.assertIn(str(self.output / 'mihomo'), (self.output / 'core.mod').read_text())
-        self.assertIn(str(self.output / 'mihomo'), (self.output / 'core/go.mod').read_text())
+        for modfile in [self.output / 'core.mod', self.output / 'core/go.mod']:
+            with self.subTest(modfile=modfile.name):
+                selected = json.loads(API['go'](
+                    ['list', '-mod=readonly', '-modfile=' + str(modfile), '-m', '-json', API['MODULE']],
+                    self.core))
+                self.assertEqual(API['MODULE'], selected['Path'])
+                self.assertEqual('v1.19.34', selected['Version'])
+                self.assertTrue(Path(selected['Replace']['Dir']).samefile(self.output / 'mihomo'))
         self.assert_originals()
         self.prepare()
         self.assert_originals()
+
+    def test_cli_prepares_pinned_source_with_an_empty_module_cache(self):
+        proxy = self.root / 'proxy'
+        versions = proxy / API['MODULE'] / '@v'
+        versions.mkdir(parents=True)
+        version = API['VERSION']
+        (versions / f'{version}.mod').write_bytes((self.source / 'go.mod').read_bytes())
+        (versions / f'{version}.info').write_text(json.dumps({'Version': version, 'Time': '2026-01-01T00:00:00Z'}))
+        with zipfile.ZipFile(versions / f'{version}.zip', 'w') as archive:
+            for path in self.source.rglob('*'):
+                if path.is_file():
+                    archive.write(path, f'{API["MODULE"]}@{version}/{path.relative_to(self.source).as_posix()}')
+        environment = {'GOPROXY': proxy.as_uri(), 'GOSUMDB': 'off', 'GOTOOLCHAIN': 'local',
+                       'GOMODCACHE': str(self.root / 'seed-cache')}
+        real_prepare = API['prepare']
+        arguments = [str(SCRIPT), '--core-root', str(self.core), '--output', str(self.output)]
+        with mock.patch.dict(os.environ, environment):
+            downloaded = json.loads(API['go'](['mod', 'download', '-json', f'{API["MODULE"]}@{version}'], self.root))
+            (self.core / 'go.sum').write_text(
+                f'{API["MODULE"]} {version} {downloaded["Sum"]}\n'
+                f'{API["MODULE"]} {version}/go.mod {downloaded["GoModSum"]}\n')
+            self.production_bytes = {name: (self.core / name).read_bytes() for name in ['go.mod', 'go.sum']}
+            os.environ['GOMODCACHE'] = str(self.root / 'cold-cache')
+            selected = json.loads(API['go'](['list', '-mod=readonly', '-m', '-json', API['MODULE']], self.core))
+            self.assertNotIn('Dir', selected)
+            with mock.patch.object(sys, 'argv', arguments), mock.patch.dict(API['main'].__globals__, ROOT=self.root,
+                    prepare=lambda core, source, output: real_prepare(core, source, output, self.lock)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                API['main']()
+            prepared = json.loads(output.getvalue())
+            self.assertEqual('v1.19.34', prepared['version'])
+            for name in API['FILES']:
+                self.assertEqual('patched fixture\n', (self.output / 'mihomo' / name).read_text())
+                self.assertEqual('original fixture\n', (self.root / 'cold-cache' / f'{API["MODULE"]}@{version}' / name).read_text())
+            self.assert_originals()
 
     def test_tampered_source_preserves_previous_build(self):
         self.previous_output()

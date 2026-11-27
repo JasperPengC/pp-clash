@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "nodeVersion": "24.18.0",
+  "releaseTag": "android-node-v24.18.0-7af9629a7f4a2f38",
+  "targets": {
+    "android-arm64": {
+      "archive": "android-node-android-arm64.tar.gz",
+      "sha256": "ec575ec5f1a1f3cbb10d964456e8258798fcf4b996772f402332827809fec58b",
+      "bytes": 36772502,
+      "inputSha256": "59466c44cb0b916cd79f4948ef8586d1eee30ed6e6a42a8a72b4172282bab8fc",
+      "nodeSha256": "140165d37f03d2ea699138c036913c6b1e5f2d46016754eecb7f84242f4d5771",
+      "licenseSha256": "0c01119644b80c693df72867685d9ae297be380d0fc976fefdafbe35ae4c3e8b",
+      "sourceBuildSha256": "f82366134deaf8f9dbec25df9d3e4629d718f22c50a80c42a3a16d3f5db492d0",
+      "sourceDigest": "6feebca197b0b597c714f7fe8e4234f486351f000048b45f23a50c78f007871f",
+      "compileSources": {
+        "scripts/sub-store/build-android-runtime.cjs": "a08d66471b0454bf576b7f1c595f2c14de7ce44cc7fc8f3b554189d08ab946c9",
+        "scripts/sub-store/android-target.patch": "b81c3ead95e7df5f5224f78bd9f072cd763a4229d77d31d62ee3e1da513c3dfa",
+        "scripts/sub-store/android-linux-host.patch": "841e9ef9406d6933ac1223a11aef7c5b747bd319078b1ad1c16d563440f70332"
+      },
+      "url": "https://github.com/JasperPengC/pp-clash/releases/download/android-node-v24.18.0-7af9629a7f4a2f38/android-node-android-arm64.tar.gz"
+    },
+    "android-x64": {
+      "archive": "android-node-android-x64.tar.gz",
+      "sha256": "260f78f16105593bb009e4fb9e33151dab8296dc8043147454e73e0376a0f8ad",
+      "bytes": 37266050,
+      "inputSha256": "33f2c3d760b8416c737cce69ba2ba92ca8d7d84f31ce1f50e1b67886c86fe069",
+      "nodeSha256": "8cce6bdfe7612a6eda88a465fc166781d5f2d0e8ad0cf51007514d1ed63b7f4d",
+      "licenseSha256": "0c01119644b80c693df72867685d9ae297be380d0fc976fefdafbe35ae4c3e8b",
+      "sourceBuildSha256": "88cb2ce465f257f0f9b983e93a49553846752b4819a0106c2c6830e2dd984810",
+      "sourceDigest": "6feebca197b0b597c714f7fe8e4234f486351f000048b45f23a50c78f007871f",
+      "compileSources": {
+        "scripts/sub-store/build-android-runtime.cjs": "a08d66471b0454bf576b7f1c595f2c14de7ce44cc7fc8f3b554189d08ab946c9",
+        "scripts/sub-store/android-target.patch": "b81c3ead95e7df5f5224f78bd9f072cd763a4229d77d31d62ee3e1da513c3dfa",
+        "scripts/sub-store/android-linux-host.patch": "841e9ef9406d6933ac1223a11aef7c5b747bd319078b1ad1c16d563440f70332"
+      },
+      "url": "https://github.com/JasperPengC/pp-clash/releases/download/android-node-v24.18.0-7af9629a7f4a2f38/android-node-android-x64.tar.gz"
+    }
+  }
+}

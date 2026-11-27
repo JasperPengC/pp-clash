@@ -13,6 +13,37 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 
 @unittest.skipIf(os.name == "nt", "Android build uses POSIX Bash")
 class AndroidBuildPreparationTests(unittest.TestCase):
+    def test_missing_runtime_artifact_stops_before_source_compilers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'scripts').mkdir()
+            shutil.copy2(SCRIPTS / 'build-android.sh', root / 'scripts/build-android.sh')
+            tools = root / 'tools'
+            tools.mkdir()
+            fixture = tools / 'fixture'
+            fixture.write_text(f'#!{sys.executable}\n' + '''
+import json, pathlib, sys
+name = pathlib.Path(sys.argv[0]).name
+with pathlib.Path('commands.jsonl').open('a') as log:
+    log.write(json.dumps({'name':name,'args':sys.argv[1:]})+'\\n')
+if name=='python3': sys.exit(1)
+if name=='node' and 'android-runtime-artifact.cjs' in sys.argv[1]:
+    sys.exit(17 if 'prepare' in sys.argv else 19)
+sys.exit(91)
+''')
+            fixture.chmod(0o755)
+            for command in ('node', 'python3', 'go', 'npm', 'gomobile'):
+                (tools / command).symlink_to(fixture)
+            env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                       ANDROID_HOME=str(root / 'sdk'))
+            result = subprocess.run(['bash', 'scripts/build-android.sh', 'debug'], cwd=root,
+                                    env=env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+            rows = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
+            self.assertTrue(any('prepare' in row['args'] for row in rows))
+            self.assertFalse(any(row['name'] in ('go', 'gomobile', 'npm') for row in rows))
+            self.assertFalse(any('scripts/sub-store/build-android-runtime.cjs' in row['args'] for row in rows))
+
     def test_fresh_and_existing_projects_clean_outputs_before_tauri_build(self):
         for initialized in (False, True):
             with self.subTest(initialized=initialized), tempfile.TemporaryDirectory() as tmp:

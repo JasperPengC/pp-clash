@@ -2,6 +2,7 @@
 import json
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -227,6 +228,35 @@ console.log(JSON.stringify({calls,source}));
         self.assertIn('/unix/bsd-ifaddrs.o', text)
         self.assertIn('/unix/darwin.o', text)
         self.assertNotIn('/unix/linux.o', text)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux-specific host configuration')
+    @unittest.skipUnless(ndk_tool('aarch64-linux-android24-clang').exists(), 'Pinned NDK is unavailable')
+    def test_linux_host_snapshot_configuration_selects_required_trap_handlers(self):
+        archive = Path(os.environ.get('PPCLASH_NODE_SOURCE_ARCHIVE',
+                                     ROOT / '.cache/sub-store-android/node-v24.18.0.tar.xz'))
+        if not archive.is_file():
+            self.skipTest('Pinned official Node source archive is unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            shutil.copy2(archive, cache / archive.name)
+            for target in ['android-arm64', 'android-x64']:
+                with self.subTest(target=target):
+                    configured = self.cli('--target', target, '--cache', str(cache),
+                                          '--host-cc', 'gcc-12', '--host-cxx', 'g++-12',
+                                          '--offline', '--configure-only')
+                    self.assertEqual(configured.returncode, 0, configured.stderr)
+                    generated = cache / target / 'node-v24.18.0/out/tools/v8_gypfiles'
+                    host = set(re.findall(r'/trap-handler/([a-z-]+)\.o',
+                                          (generated / 'v8_base_without_compiler.host.mk').read_text()))
+                    required = {'handler-inside-posix', 'handler-outside-posix'}
+                    if target == 'android-arm64':
+                        required.add('handler-outside-simulator')
+                    self.assertTrue(required <= host, f'Snapshot linker lacks host implementations: {required - host}')
+                    android = set(re.findall(r'/trap-handler/([a-z-]+)\.o',
+                                             (generated / 'v8_base_without_compiler.target.mk').read_text()))
+                    self.assertFalse({'handler-inside-posix', 'handler-outside-posix',
+                                      'handler-outside-simulator'} & android,
+                                     'Host trap handlers must not be enabled in the Android target')
 
     def test_probe_exercises_complete_host_builtins_and_requires_android_by_default(self):
         probe = ROOT / 'scripts/sub-store/android-runtime-probe.cjs'

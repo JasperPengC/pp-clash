@@ -24,10 +24,12 @@ export GOBIN="$work/bin"
 for pair in "android-arm64 aarch64" "android-x64 x86_64"; do
   read -r runtime_target runtime_arch <<< "$pair"
   runtime_root="$root/src-tauri/resources/sub-store"
-  if ! python3 scripts/validate-sub-store-resources.py "$runtime_root" "$runtime_arch" --platform android \
-    || ! node scripts/sub-store/build-android-runtime.cjs --target "$runtime_target" --verify-elf "$runtime_root/$runtime_target/node"; then
-    node scripts/sub-store/build-android-runtime.cjs --target "$runtime_target"
+  if ! node scripts/sub-store/android-runtime-artifact.cjs verify --target "$runtime_target" --resources "$runtime_root" \
+    || ! python3 scripts/validate-sub-store-resources.py "$runtime_root" "$runtime_arch" --platform android; then
+    node scripts/sub-store/android-runtime-artifact.cjs prepare --target "$runtime_target"
   fi
+  node scripts/sub-store/android-runtime-artifact.cjs verify --target "$runtime_target" --resources "$runtime_root"
+  python3 scripts/validate-sub-store-resources.py "$runtime_root" "$runtime_arch" --platform android
 done
 python3 scripts/prepare-android-geodata.py
 mobile="v0.0.0-20261117202452-47699113848a"

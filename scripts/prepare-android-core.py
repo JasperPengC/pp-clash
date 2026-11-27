@@ -126,7 +126,18 @@ def main():
     selected = json.loads(go(['list', '-mod=readonly', '-m', '-json', MODULE], args.core_root))
     if selected.get('Version') != VERSION or selected.get('Replace'):
         parser.error(f'Production module must select unreplaced {MODULE} {VERSION}')
-    source = args.source or Path(selected['Dir'])
+    source = args.source
+    if source is None:
+        if not selected.get('Dir'):
+            # Module metadata can exist before its sources have been downloaded.
+            # Download outside the production module so its go.sum stays intact.
+            with tempfile.TemporaryDirectory(prefix='ppclash-module-download-') as directory:
+                selected = json.loads(go(['mod', 'download', '-json', f'{MODULE}@{VERSION}'], directory))
+            if (selected.get('Path') != MODULE or selected.get('Version') != VERSION
+                    or selected.get('Error') or not selected.get('Dir')
+                    or not Path(selected['Dir']).is_dir()):
+                parser.error(f'Could not download pinned module source: {MODULE} {VERSION}')
+        source = Path(selected['Dir'])
     print(json.dumps(prepare(args.core_root, source, args.output), indent=2))
 
 
